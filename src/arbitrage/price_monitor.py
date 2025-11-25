@@ -1,0 +1,299 @@
+"""
+Price Monitoring System
+Continuously monitors prices across all exchanges
+"""
+
+import asyncio
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from dataclasses import dataclass, field
+from collections import defaultdict
+
+from ..exchanges.base_exchange import BaseExchange, OrderBook
+from ..utils.logger import get_logger
+
+logger = get_logger()
+
+
+@dataclass
+class PriceData:
+    """Price data structure"""
+    exchange: str
+    symbol: str
+    bid: float
+    ask: float
+    mid: float
+    spread: float
+    spread_percent: float
+    timestamp: datetime
+    order_book: Optional[OrderBook] = None
+
+
+@dataclass
+class ArbitrageOpportunity:
+    """Arbitrage opportunity data"""
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    buy_price: float
+    sell_price: float
+    gross_profit_percent: float
+    timestamp: datetime
+    buy_order_book: Optional[OrderBook] = None
+    sell_order_book: Optional[OrderBook] = None
+    
+    @property
+    def price_difference(self) -> float:
+        """Calculate absolute price difference"""
+        return self.sell_price - self.buy_price
+    
+    def __repr__(self) -> str:
+        return (f"ArbitrageOpportunity(symbol={self.symbol}, "
+                f"buy={self.buy_exchange}@{self.buy_price:.4f}, "
+                f"sell={self.sell_exchange}@{self.sell_price:.4f}, "
+                f"profit={self.gross_profit_percent:.2f}%)")
+
+
+class PriceMonitor:
+    """Monitors prices across multiple exchanges"""
+    
+    def __init__(
+        self,
+        exchanges: Dict[str, BaseExchange],
+        trading_pairs: List[str],
+        update_interval: float = 0.1,  # 100ms
+        min_profit_threshold: float = 0.5
+    ):
+        """
+        Initialize price monitor
+        
+        Args:
+            exchanges: Dictionary of exchange_name -> exchange_connector
+            trading_pairs: List of trading pairs to monitor
+            update_interval: Price update interval in seconds
+            min_profit_threshold: Minimum profit % to consider opportunity
+        """
+        self.exchanges = exchanges
+        self.trading_pairs = trading_pairs
+        self.update_interval = update_interval
+        self.min_profit_threshold = min_profit_threshold
+        
+        # Price storage
+        self.current_prices: Dict[str, Dict[str, PriceData]] = defaultdict(dict)
+        self.price_history: List[PriceData] = []
+        
+        # Arbitrage opportunities
+        self.opportunities: List[ArbitrageOpportunity] = []
+        self.opportunity_callbacks = []
+        
+        # Monitoring state
+        self.is_running = False
+        self.monitor_tasks = []
+        
+        logger.info(f"Price monitor initialized for {len(trading_pairs)} pairs across {len(exchanges)} exchanges")
+    
+    def add_opportunity_callback(self, callback):
+        """Add callback function to be called when opportunity is found"""
+        self.opportunity_callbacks.append(callback)
+    
+    async def start(self):
+        """Start price monitoring"""
+        if self.is_running:
+            logger.warning("Price monitor is already running")
+            return
+        
+        self.is_running = True
+        logger.info("Starting price monitor...")
+        
+        # Start monitoring tasks for each exchange-pair combination
+        for exchange_name, exchange in self.exchanges.items():
+            for symbol in self.trading_pairs:
+                task = asyncio.create_task(
+                    self._monitor_price(exchange_name, exchange, symbol)
+                )
+                self.monitor_tasks.append(task)
+        
+        # Start opportunity detection task
+        detect_task = asyncio.create_task(self._detect_opportunities())
+        self.monitor_tasks.append(detect_task)
+        
+        logger.info(f"Price monitor started with {len(self.monitor_tasks)} tasks")
+    
+    async def stop(self):
+        """Stop price monitoring"""
+        if not self.is_running:
+            return
+        
+        logger.info("Stopping price monitor...")
+        self.is_running = False
+        
+        # Cancel all monitoring tasks
+        for task in self.monitor_tasks:
+            task.cancel()
+        
+        # Wait for all tasks to complete
+        await asyncio.gather(*self.monitor_tasks, return_exceptions=True)
+        
+        self.monitor_tasks = []
+        logger.info("Price monitor stopped")
+    
+    async def _monitor_price(
+        self, 
+        exchange_name: str, 
+        exchange: BaseExchange, 
+        symbol: str
+    ):
+        """Monitor price for a specific exchange and symbol"""
+        while self.is_running:
+            try:
+                # Fetch order book
+                order_book = await exchange.get_order_book(symbol, depth=10)
+                
+                # Extract price data
+                if order_book.best_bid and order_book.best_ask:
+                    price_data = PriceData(
+                        exchange=exchange_name,
+                        symbol=symbol,
+                        bid=order_book.best_bid[0],
+                        ask=order_book.best_ask[0],
+                        mid=(order_book.best_bid[0] + order_book.best_ask[0]) / 2,
+                        spread=order_book.spread or 0,
+                        spread_percent=order_book.spread_percent or 0,
+                        timestamp=order_book.timestamp,
+                        order_book=order_book
+                    )
+                    
+                    # Store current price
+                    self.current_prices[symbol][exchange_name] = price_data
+                    
+                    # Add to history
+                    self.price_history.append(price_data)
+                    
+                    # Limit history size
+                    if len(self.price_history) > 10000:
+                        self.price_history = self.price_history[-5000:]
+                
+                await asyncio.sleep(self.update_interval)
+            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error monitoring price for {exchange_name} {symbol}: {e}")
+                await asyncio.sleep(1)  # Wait before retry
+    
+    async def _detect_opportunities(self):
+        """Continuously detect arbitrage opportunities"""
+        while self.is_running:
+            try:
+                # Check each trading pair
+                for symbol in self.trading_pairs:
+                    if symbol not in self.current_prices:
+                        continue
+                    
+                    prices = self.current_prices[symbol]
+                    
+                    # Need at least 2 exchanges to find arbitrage
+                    if len(prices) < 2:
+                        continue
+                    
+                    # Find best buy and sell prices
+                    best_buy_exchange = None
+                    best_buy_price = float('inf')
+                    best_buy_data = None
+                    
+                    best_sell_exchange = None
+                    best_sell_price = 0
+                    best_sell_data = None
+                    
+                    for exchange_name, price_data in prices.items():
+                        # Best buy (lowest ask)
+                        if price_data.ask < best_buy_price:
+                            best_buy_price = price_data.ask
+                            best_buy_exchange = exchange_name
+                            best_buy_data = price_data
+                        
+                        # Best sell (highest bid)
+                        if price_data.bid > best_sell_price:
+                            best_sell_price = price_data.bid
+                            best_sell_exchange = exchange_name
+                            best_sell_data = price_data
+                    
+                    # Check if there's an opportunity
+                    if (best_buy_exchange and best_sell_exchange and 
+                        best_buy_exchange != best_sell_exchange):
+                        
+                        # Calculate gross profit percentage
+                        gross_profit_percent = ((best_sell_price - best_buy_price) / best_buy_price) * 100
+                        
+                        if gross_profit_percent >= self.min_profit_threshold:
+                            opportunity = ArbitrageOpportunity(
+                                symbol=symbol,
+                                buy_exchange=best_buy_exchange,
+                                sell_exchange=best_sell_exchange,
+                                buy_price=best_buy_price,
+                                sell_price=best_sell_price,
+                                gross_profit_percent=gross_profit_percent,
+                                timestamp=datetime.now(),
+                                buy_order_book=best_buy_data.order_book if best_buy_data else None,
+                                sell_order_book=best_sell_data.order_book if best_sell_data else None
+                            )
+                            
+                            # Add to opportunities list
+                            self.opportunities.append(opportunity)
+                            
+                            # Limit opportunities list size
+                            if len(self.opportunities) > 1000:
+                                self.opportunities = self.opportunities[-500:]
+                            
+                            # Notify callbacks
+                            for callback in self.opportunity_callbacks:
+                                try:
+                                    await callback(opportunity)
+                                except Exception as e:
+                                    logger.error(f"Error in opportunity callback: {e}")
+                
+                await asyncio.sleep(self.update_interval)
+            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error detecting opportunities: {e}")
+                await asyncio.sleep(1)
+    
+    def get_current_price(self, symbol: str, exchange: str) -> Optional[PriceData]:
+        """Get current price for symbol on exchange"""
+        return self.current_prices.get(symbol, {}).get(exchange)
+    
+    def get_all_prices(self, symbol: str) -> Dict[str, PriceData]:
+        """Get all current prices for a symbol"""
+        return self.current_prices.get(symbol, {})
+    
+    def get_recent_opportunities(self, limit: int = 10) -> List[ArbitrageOpportunity]:
+        """Get recent arbitrage opportunities"""
+        return self.opportunities[-limit:]
+    
+    def get_opportunity_count(self) -> int:
+        """Get total number of opportunities found"""
+        return len(self.opportunities)
+    
+    def get_statistics(self) -> Dict:
+        """Get monitoring statistics"""
+        total_updates = len(self.price_history)
+        
+        symbol_counts = defaultdict(int)
+        exchange_counts = defaultdict(int)
+        
+        for price in self.price_history:
+            symbol_counts[price.symbol] += 1
+            exchange_counts[price.exchange] += 1
+        
+        return {
+            'total_price_updates': total_updates,
+            'symbols_monitored': len(self.trading_pairs),
+            'exchanges_monitored': len(self.exchanges),
+            'opportunities_found': len(self.opportunities),
+            'symbol_update_counts': dict(symbol_counts),
+            'exchange_update_counts': dict(exchange_counts),
+            'is_running': self.is_running
+        }
+

@@ -1,0 +1,147 @@
+# ===========================================
+# ARBITRAGE BOT CONFIGURATION
+# ===========================================
+
+# ----- GENERAL SETTINGS -----
+bot:
+  name: "Arbitrage Cross-Exchange Bot"
+  version: "1.0.0"
+  paper_trading: true  # Set to false for live trading
+  
+# ----- TRADING PARAMETERS -----
+trading:
+  min_profit_threshold: 0.5  # Minimum profit % after all fees
+  max_trade_size_percent: 10  # Max % of available capital per trade
+  max_slippage_percent: 1.0   # Max slippage for DEX trades
+  order_timeout_seconds: 30   # Max time to wait for order execution
+  retry_attempts: 3
+  
+# ----- RISK MANAGEMENT -----
+risk:
+  max_drawdown_percent: 20.0
+  max_daily_loss_percent: 5.0
+  max_position_size_usd: 10000
+  emergency_stop_enabled: true
+  
+# ----- CEX EXCHANGES -----
+# Enable exchanges in the dashboard after adding API keys
+exchanges:
+  cex:
+    - name: binance
+      enabled: false      # Enable in dashboard after adding API keys
+      order_type: market  # market or limit
+      max_latency_ms: 50
+      websocket_enabled: true
+      
+    - name: okx
+      enabled: false      # Enable in dashboard after adding API keys
+      order_type: market
+      max_latency_ms: 50
+      websocket_enabled: true
+      
+    - name: bybit
+      enabled: false      # Enable in dashboard after adding API keys
+      order_type: market
+      max_latency_ms: 50
+      websocket_enabled: true
+
+# ----- DEX EXCHANGES -----
+# Disabled by default - enable in dashboard after adding private keys
+  dex:
+    - name: pancakeswap
+      enabled: false      # Enable in dashboard after adding BSC private key
+      chain: bsc
+      router_address: "0x10ED43C718714eb63d5aA57B78B54704E256024E"
+      factory_address: "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
+      
+    - name: uniswap_v2
+      enabled: false      # Enable in dashboard after adding ETH private key
+      chain: ethereum
+      router_address: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+      factory_address: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+      
+    - name: uniswap_v3
+      enabled: false
+      chain: ethereum
+      
+    - name: quickswap
+      enabled: false      # Enable in dashboard after adding Polygon private key
+      chain: polygon
+      router_address: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
+      factory_address: "0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32"
+
+# ----- BLOCKCHAIN NETWORKS -----
+networks:
+  ethereum:
+    chain_id: 1
+    gas_price_strategy: fast  # slow, average, fast
+    max_gas_price_gwei: 100
+    
+  bsc:
+    chain_id: 56
+    gas_price_strategy: fast
+    max_gas_price_gwei: 10
+    
+  polygon:
+    chain_id: 137
+    gas_price_strategy: fast
+    max_gas_price_gwei: 500
+
+# ----- TRADING PAIRS -----
+# Format: BASE/QUOTE
+trading_pairs:
+  - symbol: BTC/USDT
+    min_trade_amount: 0.001
+    enabled: true
+    
+  - symbol: ETH/USDT
+    min_trade_amount: 0.01
+    enabled: true
+    
+  - symbol: BNB/USDT
+    min_trade_amount: 0.1
+    enabled: true
+    
+  - symbol: MATIC/USDT
+    min_trade_amount: 10
+    enabled: true
+
+# ----- REBALANCING -----
+rebalancing:
+  enabled: true
+  check_interval_minutes: 60
+  target_allocation:
+    USDT: 50  # 50% in stablecoin
+    BTC: 20
+    ETH: 20
+    BNB: 5
+    MATIC: 5
+  rebalance_threshold_percent: 10  # Trigger if deviation > 10%
+
+# ----- MONITORING -----
+monitoring:
+  dashboard_enabled: true
+  dashboard_port: 3000
+  prometheus_enabled: true
+  prometheus_port: 9090
+  
+  alerts:
+    telegram_enabled: true
+    email_enabled: true
+    alert_on_trade: true
+    alert_on_error: true
+    alert_on_high_profit: true
+    high_profit_threshold: 2.0  # Alert if profit > 2%
+
+# ----- DATA STORAGE -----
+storage:
+  save_price_data: true
+  save_trade_history: true
+  data_retention_days: 90
+  
+# ----- PERFORMANCE -----
+performance:
+  max_concurrent_opportunities: 5
+  price_update_interval_ms: 100
+  order_book_depth: 10
+
