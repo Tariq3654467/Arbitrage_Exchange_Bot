@@ -1,5 +1,5 @@
 # Multi-stage build for optimized image size
-FROM python:3.11-slim as builder
+FROM python:3.11 as builder
 
 WORKDIR /app
 
@@ -28,10 +28,12 @@ RUN apt-get update && apt-get install -y \
 # Copy Python dependencies from builder
 COPY --from=builder /root/.local /root/.local
 
+
 # Copy application code
 COPY src/ ./src/
 COPY config/ ./config/
 COPY main.py .
+COPY run_dashboard.py .
 
 # Create logs directory
 RUN mkdir -p logs
