@@ -26,6 +26,22 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+    container_name: arbitrage_frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://dashboard:8000
+    ports:
+      - "3001:3000"
+    depends_on:
+      - dashboard
+    networks:
+      - arbitrage_network
+
   # PostgreSQL Database
   postgres:
     image: postgres:15-alpine

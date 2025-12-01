@@ -219,11 +219,28 @@ class PriceMonitor:
                             best_sell_data = price_data
                     
                     # Check if there's an opportunity
-                    if (best_buy_exchange and best_sell_exchange and 
-                        best_buy_exchange != best_sell_exchange):
-                        
-                        # Calculate gross profit percentage
-                        gross_profit_percent = ((best_sell_price - best_buy_price) / best_buy_price) * 100
+                    # Allow both cross-exchange and same-exchange arbitrage
+                    if best_buy_exchange and best_sell_exchange:
+                        # For same-exchange arbitrage, check if spread is profitable
+                        # (bid > ask would indicate a market inefficiency, but normally bid < ask)
+                        # So we check if the spread is large enough to be profitable after fees
+                        if best_buy_exchange == best_sell_exchange:
+                            # Same-exchange arbitrage: check if spread is profitable
+                            # This could be triangular arbitrage or exploiting order book depth
+                            spread = best_sell_price - best_buy_price
+                            spread_percent = (spread / best_buy_price) * 100 if best_buy_price > 0 else 0
+                            
+                            # For same-exchange, we need a larger spread to account for fees
+                            # Typically need at least 0.2-0.3% more than cross-exchange
+                            min_spread_threshold = self.min_profit_threshold + 0.2
+                            
+                            if spread_percent >= min_spread_threshold:
+                                gross_profit_percent = spread_percent
+                            else:
+                                continue
+                        else:
+                            # Cross-exchange arbitrage (original logic)
+                            gross_profit_percent = ((best_sell_price - best_buy_price) / best_buy_price) * 100
                         
                         if gross_profit_percent >= self.min_profit_threshold:
                             opportunity = ArbitrageOpportunity(

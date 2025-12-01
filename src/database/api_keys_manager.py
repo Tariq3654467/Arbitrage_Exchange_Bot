@@ -4,12 +4,47 @@ Securely stores and retrieves API keys from database
 """
 
 import os
+from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from ..utils.logger import get_logger
 
 logger = get_logger()
+
+
+def _load_or_create_encryption_key() -> str:
+    """
+    Load encryption key from ENV or file, or create a new one once.
+
+    Priority:
+    1. ENCRYPTION_KEY environment variable
+    2. data/.encryption_key file (created if missing)
+    """
+    # 1) Environment variable (takes precedence)
+    env_key = os.getenv("ENCRYPTION_KEY")
+    if env_key:
+        return env_key.strip()
+
+    # 2) Local file in data/.encryption_key
+    key_file = Path("data") / ".encryption_key"
+    try:
+        if key_file.exists():
+            return key_file.read_text(encoding="utf-8").strip()
+
+        # Generate once and persist
+        key = Fernet.generate_key().decode()
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(key, encoding="utf-8")
+        logger.warning(
+            "Generated new encryption key file at data/.encryption_key. "
+            "Back this up if you want to keep API keys across machines."
+        )
+        return key
+    except Exception as e:
+        # Fallback: generate in-memory key (keys won't be decryptable after restart)
+        logger.error(f"Error loading/saving encryption key file: {e}")
+        return Fernet.generate_key().decode()
 
 
 class APIKeysManager:
@@ -24,16 +59,15 @@ class APIKeysManager:
             encryption_key: Encryption key (generated if not provided)
         """
         self.db = db_manager
-        
-        # Initialize encryption
+
+        # Initialize encryption with stable key
         if encryption_key:
-            self.cipher = Fernet(encryption_key.encode())
+            key_str = encryption_key
         else:
-            # Generate new key if not provided
-            key = Fernet.generate_key()
-            self.cipher = Fernet(key)
-            self.encryption_key = key.decode()
-            logger.warning(f"Generated new encryption key. Save this securely: {self.encryption_key}")
+            key_str = _load_or_create_encryption_key()
+
+        self.encryption_key = key_str
+        self.cipher = Fernet(key_str.encode())
         
         self._initialize_table()
     
@@ -191,15 +225,24 @@ class APIKeysManager:
                     'testnet': row['testnet'],
                     'enabled': row['enabled']
                 }
-                
-                # Decrypt keys
-                if row['exchange_type'] == 'cex':
-                    result['api_key'] = self._decrypt(row['api_key']) if row['api_key'] else None
-                    result['api_secret'] = self._decrypt(row['api_secret']) if row['api_secret'] else None
-                    result['passphrase'] = self._decrypt(row['passphrase']) if row['passphrase'] else None
-                else:  # dex
-                    result['private_key'] = self._decrypt(row['private_key']) if row['private_key'] else None
-                
+
+                # Decrypt keys – keep InvalidToken inside the cursor context
+                try:
+                    if row['exchange_type'] == 'cex':
+                        result['api_key'] = self._decrypt(row['api_key']) if row['api_key'] else None
+                        result['api_secret'] = self._decrypt(row['api_secret']) if row['api_secret'] else None
+                        result['passphrase'] = self._decrypt(row['passphrase']) if row['passphrase'] else None
+                    else:  # dex
+                        result['private_key'] = self._decrypt(row['private_key']) if row['private_key'] else None
+                except InvalidToken:
+                    # Happens if encryption key changed since keys were saved
+                    logger.error(
+                        "Encryption key mismatch when reading keys for %s. "
+                        "You may need to reset stored API keys (truncate api_keys table).",
+                        exchange_name,
+                    )
+                    return None
+
                 return result
         
         except Exception as e:

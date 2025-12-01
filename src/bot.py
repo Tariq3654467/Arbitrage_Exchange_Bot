@@ -15,6 +15,7 @@ from .exchanges.cex.okx_connector import OKXConnector
 from .exchanges.cex.bybit_connector import BybitConnector
 from .exchanges.dex.pancakeswap_connector import PancakeSwapConnector
 from .exchanges.dex.uniswap_connector import UniswapConnector
+from .exchanges.dex.galaswap_connector import GalaswapConnector
 from .arbitrage.price_monitor import PriceMonitor, ArbitrageOpportunity
 from .arbitrage.arbitrage_calculator import ArbitrageCalculator
 from .arbitrage.trade_executor import TradeExecutor
@@ -96,27 +97,31 @@ class ArbitrageBot:
         """Initialize exchange connectors"""
         logger.info("Connecting to exchanges...")
         
-        # CEX exchanges
+        # CEX exchanges from config
         for exchange_config in self.settings.get_cex_exchanges():
             try:
+                # Use testnet from config if set, otherwise fall back to environment variable
                 if exchange_config.name == "binance":
+                    testnet = exchange_config.testnet if hasattr(exchange_config, 'testnet') else self.settings.binance_testnet
                     connector = BinanceConnector(
                         api_key=self.settings.binance_api_key,
                         api_secret=self.settings.binance_api_secret,
-                        testnet=self.settings.binance_testnet
+                        testnet=testnet
                     )
                 elif exchange_config.name == "okx":
+                    testnet = exchange_config.testnet if hasattr(exchange_config, 'testnet') else self.settings.okx_testnet
                     connector = OKXConnector(
                         api_key=self.settings.okx_api_key,
                         api_secret=self.settings.okx_api_secret,
                         passphrase=self.settings.okx_passphrase,
-                        testnet=self.settings.okx_testnet
+                        testnet=testnet
                     )
                 elif exchange_config.name == "bybit":
+                    testnet = exchange_config.testnet if hasattr(exchange_config, 'testnet') else self.settings.bybit_testnet
                     connector = BybitConnector(
                         api_key=self.settings.bybit_api_key,
                         api_secret=self.settings.bybit_api_secret,
-                        testnet=self.settings.bybit_testnet
+                        testnet=testnet
                     )
                 else:
                     logger.warning(f"Unknown CEX: {exchange_config.name}")
@@ -128,6 +133,54 @@ class ArbitrageBot:
             
             except Exception as e:
                 logger.error(f"Failed to connect to {exchange_config.name}: {e}")
+
+        # Also support session-only API keys that were injected into settings
+        # even if the YAML config has exchanges disabled.
+        try:
+            if (
+                'binance' not in self.exchanges
+                and self.settings.binance_api_key
+                and self.settings.binance_api_secret
+            ):
+                connector = BinanceConnector(
+                    api_key=self.settings.binance_api_key,
+                    api_secret=self.settings.binance_api_secret,
+                    testnet=self.settings.binance_testnet,
+                )
+                await connector.connect()
+                self.exchanges['binance'] = connector
+                logger.info("✓ Connected to binance (from in-memory API keys)")
+
+            if (
+                'okx' not in self.exchanges
+                and self.settings.okx_api_key
+                and self.settings.okx_api_secret
+            ):
+                connector = OKXConnector(
+                    api_key=self.settings.okx_api_key,
+                    api_secret=self.settings.okx_api_secret,
+                    passphrase=self.settings.okx_passphrase,
+                    testnet=self.settings.okx_testnet,
+                )
+                await connector.connect()
+                self.exchanges['okx'] = connector
+                logger.info("✓ Connected to okx (from in-memory API keys)")
+
+            if (
+                'bybit' not in self.exchanges
+                and self.settings.bybit_api_key
+                and self.settings.bybit_api_secret
+            ):
+                connector = BybitConnector(
+                    api_key=self.settings.bybit_api_key,
+                    api_secret=self.settings.bybit_api_secret,
+                    testnet=self.settings.bybit_testnet,
+                )
+                await connector.connect()
+                self.exchanges['bybit'] = connector
+                logger.info("✓ Connected to bybit (from in-memory API keys)")
+        except Exception as e:
+            logger.error(f"Failed to connect using in-memory API keys: {e}")
         
         # DEX exchanges
         for dex_config in self.settings.get_dex_exchanges():
@@ -152,6 +205,29 @@ class ArbitrageBot:
                         continue
                     
                     connector = UniswapConnector(
+                        chain=chain,
+                        rpc_url=rpc_url,
+                        private_key=private_key,
+                        router_address=dex_config.router_address,
+                        factory_address=dex_config.factory_address
+                    )
+                elif dex_config.name == "galaswap":
+                    chain = dex_config.chain
+                    if chain == "ethereum":
+                        rpc_url = self.settings.eth_rpc_url
+                        private_key = self.settings.eth_private_key
+                    elif chain == "gala":
+                        # For Gala Chain, you may need to add gala_rpc_url and gala_private_key to settings
+                        rpc_url = getattr(self.settings, 'gala_rpc_url', '')
+                        private_key = getattr(self.settings, 'gala_private_key', '')
+                        if not rpc_url or not private_key:
+                            logger.warning(f"Gala Chain RPC URL and private key required for Galaswap")
+                            continue
+                    else:
+                        logger.warning(f"Unsupported chain for Galaswap: {chain}")
+                        continue
+                    
+                    connector = GalaswapConnector(
                         chain=chain,
                         rpc_url=rpc_url,
                         private_key=private_key,

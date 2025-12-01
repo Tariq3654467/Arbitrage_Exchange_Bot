@@ -18,7 +18,7 @@ from ..bot import ArbitrageBot
 from ..utils.logger import get_logger
 from .models import (
     BotStatus, ExchangeConfig, TradingConfig, RiskConfig,
-    TradeHistory, OpportunityData, PortfolioData
+    TradeHistory, OpportunityData, PortfolioData, StartBotRequest
 )
 
 logger = get_logger()
@@ -126,42 +126,90 @@ except Exception as e:
 # ==================== Bot Control Routes ====================
 
 @app.post("/api/bot/start")
-async def start_bot(username: str = Depends(verify_credentials)):
-    """Start the trading bot with database-configured API keys"""
+async def start_bot(
+    payload: Optional[StartBotRequest] = None,
+    username: str = Depends(verify_credentials),
+):
+    """
+    Start the trading bot.
+
+    If `payload.exchanges` is provided, API keys are taken directly from the
+    request body and NOT persisted to the database. If not provided, the
+    previous behaviour is used and keys are loaded from the database.
+    """
     global bot, bot_task
     
     try:
         if bot and bot.is_running:
             return {"status": "error", "message": "Bot is already running"}
         
-        # Check if we have database connection
-        if not postgres_db:
-            return {"status": "error", "message": "Database not available. Cannot load API keys."}
-        
-        # Load API keys from database
-        from ..database.api_keys_manager import APIKeysManager
         from ..config.settings import get_settings
-        
-        keys_manager = APIKeysManager(postgres_db)
         settings = get_settings()
-        
-        # Override settings with database keys
-        for exchange_name in ['binance', 'okx', 'bybit']:
-            keys = keys_manager.get_exchange_keys(exchange_name)
-            if keys and keys['enabled']:
-                if exchange_name == 'binance':
-                    settings.binance_api_key = keys.get('api_key', '')
-                    settings.binance_api_secret = keys.get('api_secret', '')
-                    settings.binance_testnet = keys.get('testnet', False)
-                elif exchange_name == 'okx':
-                    settings.okx_api_key = keys.get('api_key', '')
-                    settings.okx_api_secret = keys.get('api_secret', '')
-                    settings.okx_passphrase = keys.get('passphrase', '')
-                    settings.okx_testnet = keys.get('testnet', False)
-                elif exchange_name == 'bybit':
-                    settings.bybit_api_key = keys.get('api_key', '')
-                    settings.bybit_api_secret = keys.get('api_secret', '')
-                    settings.bybit_testnet = keys.get('testnet', False)
+
+        if payload and payload.exchanges:
+            # Use ephemeral keys from request body (non-persistent)
+            # and ensure corresponding exchanges are enabled in settings
+            for ex in payload.exchanges:
+                if not ex.enabled:
+                    continue
+
+                # Set API keys in settings (used by connectors)
+                if ex.exchange_name == 'binance':
+                    settings.binance_api_key = ex.api_key
+                    settings.binance_api_secret = ex.api_secret
+                elif ex.exchange_name == 'okx':
+                    settings.okx_api_key = ex.api_key
+                    settings.okx_api_secret = ex.api_secret
+                    settings.okx_passphrase = ex.passphrase or ''
+                elif ex.exchange_name == 'bybit':
+                    settings.bybit_api_key = ex.api_key
+                    settings.bybit_api_secret = ex.api_secret
+
+                # Also flip enabled flag in YAML-based config so get_cex_exchanges() returns it
+                if settings.exchanges and 'cex' in settings.exchanges:
+                    found = False
+                    for cfg in settings.exchanges['cex']:
+                        if cfg.get('name') == ex.exchange_name:
+                            cfg['enabled'] = True
+                            found = True
+                            break
+                    if not found:
+                        settings.exchanges['cex'].append(
+                            {
+                                'name': ex.exchange_name,
+                                'enabled': True,
+                                # Default new ephemeral exchanges to testnet for safety
+                                'testnet': True,
+                                'order_type': 'market',
+                                'max_latency_ms': 50,
+                                'websocket_enabled': True,
+                            }
+                        )
+        else:
+            # Backwards-compatible: load from database
+            if not postgres_db:
+                return {"status": "error", "message": "Database not available. Cannot load API keys."}
+
+            from ..database.api_keys_manager import APIKeysManager
+
+            keys_manager = APIKeysManager(postgres_db)
+
+            for exchange_name in ['binance', 'okx', 'bybit']:
+                keys = keys_manager.get_exchange_keys(exchange_name)
+                if keys and keys['enabled']:
+                    if exchange_name == 'binance':
+                        settings.binance_api_key = keys.get('api_key', '')
+                        settings.binance_api_secret = keys.get('api_secret', '')
+                        settings.binance_testnet = keys.get('testnet', False)
+                    elif exchange_name == 'okx':
+                        settings.okx_api_key = keys.get('api_key', '')
+                        settings.okx_api_secret = keys.get('api_secret', '')
+                        settings.okx_passphrase = keys.get('passphrase', '')
+                        settings.okx_testnet = keys.get('testnet', False)
+                    elif exchange_name == 'bybit':
+                        settings.bybit_api_key = keys.get('api_key', '')
+                        settings.bybit_api_secret = keys.get('api_secret', '')
+                        settings.bybit_testnet = keys.get('testnet', False)
         
         # Initialize bot with loaded settings
         bot = ArbitrageBot()

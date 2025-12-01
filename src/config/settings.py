@@ -43,6 +43,7 @@ class ExchangeConfig(BaseModel):
     """Individual exchange configuration"""
     name: str
     enabled: bool = True
+    testnet: bool = False  # Use testnet/sandbox mode
     order_type: str = "market"
     max_latency_ms: int = 50
     websocket_enabled: bool = False

@@ -26,6 +26,11 @@ class ExchangeConfig(BaseModel):
     enabled: bool = True
 
 
+class StartBotRequest(BaseModel):
+    """Optional API keys passed directly from dashboard (non-persistent)"""
+    exchanges: Optional[List[ExchangeConfig]] = None
+
+
 class TradingConfig(BaseModel):
     """Trading configuration"""
     min_profit_threshold: float = Field(gt=0, le=100)

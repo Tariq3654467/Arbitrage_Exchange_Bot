@@ -23,6 +23,7 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     libpq5 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python dependencies from builder
@@ -47,10 +48,10 @@ RUN useradd -m -u 1000 botuser && \
     chown -R botuser:botuser /app
 USER botuser
 
-# Health check
+# Health check (for dashboard mode; safe no-op if API not running)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the bot
+# Default command (docker-compose overrides this for the dashboard)
 CMD ["python", "main.py"]
 

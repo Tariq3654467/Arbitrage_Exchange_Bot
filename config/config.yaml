@@ -7,6 +7,7 @@ bot:
   name: "Arbitrage Cross-Exchange Bot"
   version: "1.0.0"
   paper_trading: true  # Set to false for live trading
+  testnet_mode: true   # Enable testnet for all exchanges (can be overridden per exchange)
   
 # ----- TRADING PARAMETERS -----
 trading:
@@ -25,22 +26,26 @@ risk:
   
 # ----- CEX EXCHANGES -----
 # Enable exchanges in the dashboard after adding API keys
+# Set testnet: true to use testnet/sandbox mode for testing
 exchanges:
   cex:
     - name: binance
-      enabled: false      # Enable in dashboard after adding API keys
+      enabled: true      # Enable in dashboard after adding API keys
+      testnet: false      # Use Binance testnet (set to false for mainnet)
       order_type: market  # market or limit
       max_latency_ms: 50
       websocket_enabled: true
       
     - name: okx
       enabled: false      # Enable in dashboard after adding API keys
+      testnet: true       # Use OKX testnet (set to false for mainnet)
       order_type: market
       max_latency_ms: 50
       websocket_enabled: true
       
     - name: bybit
       enabled: false      # Enable in dashboard after adding API keys
+      testnet: true       # Use Bybit testnet (set to false for mainnet)
       order_type: market
       max_latency_ms: 50
       websocket_enabled: true
@@ -69,6 +74,12 @@ exchanges:
       chain: polygon
       router_address: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
       factory_address: "0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32"
+      
+    - name: galaswap
+      enabled: false      # Enable in dashboard after adding private key
+      chain: ethereum      # Update to 'gala' if Galaswap runs on Gala Chain
+      router_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap router address
+      factory_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap factory address
 
 # ----- BLOCKCHAIN NETWORKS -----
 networks:
@@ -76,16 +87,22 @@ networks:
     chain_id: 1
     gas_price_strategy: fast  # slow, average, fast
     max_gas_price_gwei: 100
+    testnet_chain_id: 5  # Goerli testnet (or use Sepolia: 11155111)
+    testnet_rpc_url: "https://goerli.infura.io/v3/YOUR_INFURA_KEY"  # Update with your testnet RPC
     
   bsc:
     chain_id: 56
     gas_price_strategy: fast
     max_gas_price_gwei: 10
+    testnet_chain_id: 97  # BSC Testnet
+    testnet_rpc_url: "https://data-seed-prebsc-1-s1.binance.org:8545/"
     
   polygon:
     chain_id: 137
     gas_price_strategy: fast
     max_gas_price_gwei: 500
+    testnet_chain_id: 80001  # Mumbai testnet
+    testnet_rpc_url: "https://matic-mumbai.chainstacklabs.com"
 
 # ----- TRADING PAIRS -----
 # Format: BASE/QUOTE
