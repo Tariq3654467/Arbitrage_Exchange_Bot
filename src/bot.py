@@ -13,6 +13,7 @@ from .exchanges.base_exchange import BaseExchange
 from .exchanges.cex.binance_connector import BinanceConnector
 from .exchanges.cex.okx_connector import OKXConnector
 from .exchanges.cex.bybit_connector import BybitConnector
+from .exchanges.cex.mexc_connector import MEXCConnector
 from .exchanges.dex.pancakeswap_connector import PancakeSwapConnector
 from .exchanges.dex.uniswap_connector import UniswapConnector
 from .exchanges.dex.galaswap_connector import GalaswapConnector
@@ -123,6 +124,13 @@ class ArbitrageBot:
                         api_secret=self.settings.bybit_api_secret,
                         testnet=testnet
                     )
+                elif exchange_config.name == "mexc":
+                    testnet = exchange_config.testnet if hasattr(exchange_config, 'testnet') else self.settings.mexc_testnet
+                    connector = MEXCConnector(
+                        api_key=self.settings.mexc_api_key,
+                        api_secret=self.settings.mexc_api_secret,
+                        testnet=testnet
+                    )
                 else:
                     logger.warning(f"Unknown CEX: {exchange_config.name}")
                     continue
@@ -179,6 +187,20 @@ class ArbitrageBot:
                 await connector.connect()
                 self.exchanges['bybit'] = connector
                 logger.info("✓ Connected to bybit (from in-memory API keys)")
+            
+            if (
+                'mexc' not in self.exchanges
+                and self.settings.mexc_api_key
+                and self.settings.mexc_api_secret
+            ):
+                connector = MEXCConnector(
+                    api_key=self.settings.mexc_api_key,
+                    api_secret=self.settings.mexc_api_secret,
+                    testnet=self.settings.mexc_testnet,
+                )
+                await connector.connect()
+                self.exchanges['mexc'] = connector
+                logger.info("✓ Connected to mexc (from in-memory API keys)")
         except Exception as e:
             logger.error(f"Failed to connect using in-memory API keys: {e}")
         
@@ -212,27 +234,20 @@ class ArbitrageBot:
                         factory_address=dex_config.factory_address
                     )
                 elif dex_config.name == "galaswap":
-                    chain = dex_config.chain
-                    if chain == "ethereum":
-                        rpc_url = self.settings.eth_rpc_url
-                        private_key = self.settings.eth_private_key
-                    elif chain == "gala":
-                        # For Gala Chain, you may need to add gala_rpc_url and gala_private_key to settings
-                        rpc_url = getattr(self.settings, 'gala_rpc_url', '')
-                        private_key = getattr(self.settings, 'gala_private_key', '')
-                        if not rpc_url or not private_key:
-                            logger.warning(f"Gala Chain RPC URL and private key required for Galaswap")
-                            continue
-                    else:
-                        logger.warning(f"Unsupported chain for Galaswap: {chain}")
+                    # Galaswap uses GalaConnect API, not Web3
+                    # Need wallet address and private key from settings
+                    wallet_address = getattr(self.settings, 'gala_wallet_address', '')
+                    private_key = getattr(self.settings, 'gala_private_key', '')
+                    public_key = getattr(self.settings, 'gala_public_key', None)
+                    
+                    if not wallet_address or not private_key:
+                        logger.warning(f"Gala wallet address and private key required for Galaswap")
                         continue
                     
                     connector = GalaswapConnector(
-                        chain=chain,
-                        rpc_url=rpc_url,
+                        wallet_address=wallet_address,
                         private_key=private_key,
-                        router_address=dex_config.router_address,
-                        factory_address=dex_config.factory_address
+                        public_key=public_key
                     )
                 else:
                     logger.warning(f"Unknown DEX: {dex_config.name}")
@@ -325,11 +340,14 @@ class ArbitrageBot:
         trading_pairs = [pair.symbol for pair in self.settings.get_enabled_trading_pairs()]
         
         # Price monitor
+        # min_profit_threshold: for trade execution
+        # min_display_threshold: for showing opportunities in dashboard (0.01% = show all)
         self.price_monitor = PriceMonitor(
             exchanges=self.exchanges,
             trading_pairs=trading_pairs,
             update_interval=self.settings.performance['price_update_interval_ms'] / 1000,
-            min_profit_threshold=self.settings.trading.min_profit_threshold
+            min_profit_threshold=self.settings.trading.min_profit_threshold,
+            min_display_threshold=0.01  # Show all opportunities >= 0.01% in dashboard
         )
         
         # Add opportunity callback

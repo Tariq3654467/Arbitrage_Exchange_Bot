@@ -89,12 +89,27 @@ class BinanceConnector(BaseExchange):
         try:
             order_book = await self.exchange.fetch_order_book(symbol, limit=depth)
             
+            # Handle missing or None timestamp
+            timestamp_value = order_book.get('timestamp')
+            if timestamp_value is None:
+                timestamp = datetime.now()
+            else:
+                # Handle both milliseconds and seconds timestamps
+                if timestamp_value > 1e10:  # If in milliseconds
+                    timestamp = datetime.fromtimestamp(timestamp_value / 1000)
+                else:  # If in seconds
+                    timestamp = datetime.fromtimestamp(timestamp_value)
+            
+            # Ensure bids and asks exist
+            bids = order_book.get('bids', [])
+            asks = order_book.get('asks', [])
+            
             return OrderBook(
                 exchange=self.exchange_name,
                 symbol=symbol,
-                bids=[(bid[0], bid[1]) for bid in order_book['bids']],
-                asks=[(ask[0], ask[1]) for ask in order_book['asks']],
-                timestamp=datetime.fromtimestamp(order_book['timestamp'] / 1000)
+                bids=[(float(bid[0]), float(bid[1])) for bid in bids if len(bid) >= 2],
+                asks=[(float(ask[0]), float(ask[1])) for ask in asks if len(ask) >= 2],
+                timestamp=timestamp
             )
         
         except Exception as e:
@@ -105,13 +120,25 @@ class BinanceConnector(BaseExchange):
         """Get ticker data"""
         try:
             ticker = await self.exchange.fetch_ticker(symbol)
+            
+            # Handle missing or None timestamp
+            timestamp_value = ticker.get('timestamp')
+            if timestamp_value is None:
+                timestamp = datetime.now()
+            else:
+                # Handle both milliseconds and seconds timestamps
+                if timestamp_value > 1e10:  # If in milliseconds
+                    timestamp = datetime.fromtimestamp(timestamp_value / 1000)
+                else:  # If in seconds
+                    timestamp = datetime.fromtimestamp(timestamp_value)
+            
             return {
                 'symbol': symbol,
-                'bid': ticker['bid'],
-                'ask': ticker['ask'],
-                'last': ticker['last'],
-                'volume': ticker['quoteVolume'],
-                'timestamp': datetime.fromtimestamp(ticker['timestamp'] / 1000)
+                'bid': ticker.get('bid'),
+                'ask': ticker.get('ask'),
+                'last': ticker.get('last'),
+                'volume': ticker.get('quoteVolume'),
+                'timestamp': timestamp
             }
         except Exception as e:
             logger.error(f"Error fetching Binance ticker for {symbol}: {e}")
@@ -263,6 +290,17 @@ class BinanceConnector(BaseExchange):
     
     def _parse_order(self, order_data: Dict) -> Order:
         """Parse CCXT order data to Order object"""
+        # Handle missing or None timestamp
+        timestamp_value = order_data.get('timestamp')
+        if timestamp_value is None:
+            timestamp = datetime.now()
+        else:
+            # Handle both milliseconds and seconds timestamps
+            if timestamp_value > 1e10:  # If in milliseconds
+                timestamp = datetime.fromtimestamp(timestamp_value / 1000)
+            else:  # If in seconds
+                timestamp = datetime.fromtimestamp(timestamp_value)
+        
         return Order(
             exchange=self.exchange_name,
             order_id=order_data['id'],
@@ -273,7 +311,7 @@ class BinanceConnector(BaseExchange):
             quantity=order_data['amount'],
             filled_quantity=order_data['filled'],
             status=order_data['status'],
-            timestamp=datetime.fromtimestamp(order_data['timestamp'] / 1000),
+            timestamp=timestamp,
             commission=order_data.get('fee', {}).get('cost'),
             commission_asset=order_data.get('fee', {}).get('currency')
         )

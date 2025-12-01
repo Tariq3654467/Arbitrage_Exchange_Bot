@@ -72,9 +72,10 @@ class APIKeysManager:
         self._initialize_table()
     
     def _initialize_table(self):
-        """Create API keys table if not exists"""
+        """Create API keys table if not exists and add missing columns"""
         try:
             with self.db.get_cursor() as cursor:
+                # Create table if it doesn't exist
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS api_keys (
                         id SERIAL PRIMARY KEY,
@@ -90,7 +91,37 @@ class APIKeysManager:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                logger.info("API keys table initialized")
+                
+                # Add new columns if they don't exist (for existing databases)
+                new_columns = [
+                    ('wallet_address', 'TEXT'),
+                    ('rpc_url', 'TEXT'),
+                    ('router_address', 'TEXT'),
+                    ('factory_address', 'TEXT'),
+                    ('chain', 'VARCHAR(50)'),
+                ]
+                
+                for column_name, column_type in new_columns:
+                    try:
+                        cursor.execute(f"""
+                            ALTER TABLE api_keys 
+                            ADD COLUMN IF NOT EXISTS {column_name} {column_type}
+                        """)
+                    except Exception as e:
+                        # Some PostgreSQL versions don't support IF NOT EXISTS in ALTER TABLE
+                        # Check if column exists first
+                        cursor.execute("""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name='api_keys' AND column_name=%s
+                        """, (column_name,))
+                        if not cursor.fetchone():
+                            cursor.execute(f"""
+                                ALTER TABLE api_keys 
+                                ADD COLUMN {column_name} {column_type}
+                            """)
+                
+                logger.info("API keys table initialized and migrated")
         except Exception as e:
             logger.error(f"Error initializing API keys table: {e}")
     
@@ -157,42 +188,62 @@ class APIKeysManager:
         self,
         exchange_name: str,
         private_key: str,
+        wallet_address: Optional[str] = None,
+        rpc_url: Optional[str] = None,
+        router_address: Optional[str] = None,
+        factory_address: Optional[str] = None,
+        chain: Optional[str] = None,
         enabled: bool = True
     ) -> bool:
         """
-        Save DEX private key
+        Save DEX configuration (private key, RPC URL, addresses, etc.)
         
         Args:
-            exchange_name: DEX name
-            private_key: Wallet private key
+            exchange_name: DEX name (e.g., 'pancakeswap', 'galaswap')
+            private_key: Wallet private key (encrypted)
+            wallet_address: Wallet address (for Galaswap)
+            rpc_url: Blockchain RPC URL
+            router_address: DEX router contract address
+            factory_address: DEX factory contract address
+            chain: Blockchain chain name (e.g., 'bsc', 'ethereum', 'polygon', 'gala')
             enabled: Enable this DEX
         
         Returns:
             True if saved successfully
         """
         try:
-            encrypted_key = self._encrypt(private_key)
+            encrypted_key = self._encrypt(private_key) if private_key else None
+            encrypted_wallet = self._encrypt(wallet_address) if wallet_address else None
             
             with self.db.get_cursor() as cursor:
                 cursor.execute("""
                     INSERT INTO api_keys (
-                        exchange_name, exchange_type, private_key, 
+                        exchange_name, exchange_type, private_key, wallet_address,
+                        rpc_url, router_address, factory_address, chain,
                         enabled, updated_at
                     ) VALUES (
-                        %s, 'dex', %s, %s, CURRENT_TIMESTAMP
+                        %s, 'dex', %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
                     )
                     ON CONFLICT (exchange_name) 
                     DO UPDATE SET
-                        private_key = EXCLUDED.private_key,
+                        private_key = COALESCE(EXCLUDED.private_key, api_keys.private_key),
+                        wallet_address = COALESCE(EXCLUDED.wallet_address, api_keys.wallet_address),
+                        rpc_url = COALESCE(EXCLUDED.rpc_url, api_keys.rpc_url),
+                        router_address = COALESCE(EXCLUDED.router_address, api_keys.router_address),
+                        factory_address = COALESCE(EXCLUDED.factory_address, api_keys.factory_address),
+                        chain = COALESCE(EXCLUDED.chain, api_keys.chain),
                         enabled = EXCLUDED.enabled,
                         updated_at = CURRENT_TIMESTAMP
-                """, (exchange_name, encrypted_key, enabled))
+                """, (
+                    exchange_name, encrypted_key, encrypted_wallet,
+                    rpc_url, router_address, factory_address, chain, enabled
+                ))
             
-            logger.info(f"Saved private key for {exchange_name}")
+            logger.info(f"Saved DEX configuration for {exchange_name}")
             return True
         
         except Exception as e:
-            logger.error(f"Error saving private key for {exchange_name}: {e}")
+            logger.error(f"Error saving DEX configuration for {exchange_name}: {e}")
             return False
     
     def get_exchange_keys(self, exchange_name: str) -> Optional[Dict]:
@@ -209,7 +260,8 @@ class APIKeysManager:
             with self.db.get_cursor() as cursor:
                 cursor.execute("""
                     SELECT exchange_type, api_key, api_secret, passphrase, 
-                           private_key, testnet, enabled
+                           private_key, wallet_address, rpc_url, router_address,
+                           factory_address, chain, testnet, enabled
                     FROM api_keys
                     WHERE exchange_name = %s
                 """, (exchange_name,))
@@ -222,7 +274,7 @@ class APIKeysManager:
                 result = {
                     'exchange_name': exchange_name,
                     'exchange_type': row['exchange_type'],
-                    'testnet': row['testnet'],
+                    'testnet': row.get('testnet', False),
                     'enabled': row['enabled']
                 }
 
@@ -234,6 +286,11 @@ class APIKeysManager:
                         result['passphrase'] = self._decrypt(row['passphrase']) if row['passphrase'] else None
                     else:  # dex
                         result['private_key'] = self._decrypt(row['private_key']) if row['private_key'] else None
+                        result['wallet_address'] = self._decrypt(row['wallet_address']) if row.get('wallet_address') else None
+                        result['rpc_url'] = row.get('rpc_url')
+                        result['router_address'] = row.get('router_address')
+                        result['factory_address'] = row.get('factory_address')
+                        result['chain'] = row.get('chain')
                 except InvalidToken:
                     # Happens if encryption key changed since keys were saved
                     logger.error(

@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     bybit_api_secret: str = Field(default="", env="BYBIT_API_SECRET")
     bybit_testnet: bool = Field(default=False, env="BYBIT_TESTNET")
     
+    mexc_api_key: str = Field(default="", env="MEXC_API_KEY")
+    mexc_api_secret: str = Field(default="", env="MEXC_API_SECRET")
+    mexc_testnet: bool = Field(default=False, env="MEXC_TESTNET")
+    
+    # Gala Chain (for Galaswap API)
+    gala_wallet_address: str = Field(default="", env="GALA_WALLET_ADDRESS")
+    gala_private_key: str = Field(default="", env="GALA_PRIVATE_KEY")
+    gala_public_key: str = Field(default="", env="GALA_PUBLIC_KEY")
+    
     # Web3 Private Keys
     eth_private_key: str = Field(default="", env="ETH_PRIVATE_KEY")
     bsc_private_key: str = Field(default="", env="BSC_PRIVATE_KEY")
@@ -268,6 +277,9 @@ class Settings(BaseSettings):
             elif exchange.name == "bybit":
                 if not self.bybit_api_key or not self.bybit_api_secret:
                     errors.append("Bybit API keys are required")
+            elif exchange.name == "mexc":
+                if not self.mexc_api_key or not self.mexc_api_secret:
+                    errors.append("MEXC API keys are required")
         
         # Check DEX exchanges
         for dex in self.get_dex_exchanges():

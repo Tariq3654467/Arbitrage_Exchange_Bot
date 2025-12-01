@@ -3,7 +3,7 @@ FastAPI Web Dashboard
 Provides REST API and web interface for bot management
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, status, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +17,7 @@ from pathlib import Path
 from ..bot import ArbitrageBot
 from ..utils.logger import get_logger
 from .models import (
-    BotStatus, ExchangeConfig, TradingConfig, RiskConfig,
+    BotStatus, ExchangeConfig, DEXConfig, TradingConfig, RiskConfig,
     TradeHistory, OpportunityData, PortfolioData, StartBotRequest
 )
 
@@ -194,7 +194,7 @@ async def start_bot(
 
             keys_manager = APIKeysManager(postgres_db)
 
-            for exchange_name in ['binance', 'okx', 'bybit']:
+            for exchange_name in ['binance', 'okx', 'bybit', 'mexc']:
                 keys = keys_manager.get_exchange_keys(exchange_name)
                 if keys and keys['enabled']:
                     if exchange_name == 'binance':
@@ -210,6 +210,54 @@ async def start_bot(
                         settings.bybit_api_key = keys.get('api_key', '')
                         settings.bybit_api_secret = keys.get('api_secret', '')
                         settings.bybit_testnet = keys.get('testnet', False)
+                    elif exchange_name == 'mexc':
+                        settings.mexc_api_key = keys.get('api_key', '')
+                        settings.mexc_api_secret = keys.get('api_secret', '')
+                        settings.mexc_testnet = keys.get('testnet', False)
+            
+            # Load DEX configuration from database
+            dex_exchanges = ['pancakeswap', 'uniswap_v2', 'quickswap', 'galaswap']
+            for dex_name in dex_exchanges:
+                keys = keys_manager.get_exchange_keys(dex_name)
+                if keys and keys.get('enabled') and keys.get('private_key'):
+                    chain = keys.get('chain', '')
+                    rpc_url = keys.get('rpc_url', '')
+                    private_key = keys.get('private_key', '')
+                    wallet_address = keys.get('wallet_address', '')
+                    router_address = keys.get('router_address', '')
+                    factory_address = keys.get('factory_address', '')
+                    
+                    # Set private keys and RPC URLs in settings
+                    if chain == 'bsc' or dex_name == 'pancakeswap':
+                        settings.bsc_private_key = private_key
+                        if rpc_url:
+                            settings.bsc_rpc_url = rpc_url
+                    elif chain == 'ethereum' or dex_name == 'uniswap_v2':
+                        settings.eth_private_key = private_key
+                        if rpc_url:
+                            settings.eth_rpc_url = rpc_url
+                    elif chain == 'polygon' or dex_name == 'quickswap':
+                        settings.polygon_private_key = private_key
+                        if rpc_url:
+                            settings.polygon_rpc_url = rpc_url
+                    elif chain == 'gala' or dex_name == 'galaswap':
+                        settings.gala_private_key = private_key
+                        settings.gala_wallet_address = wallet_address or ''
+                        if rpc_url:
+                            setattr(settings, 'gala_rpc_url', rpc_url)
+                    
+                    # Update DEX config in settings to include router/factory addresses
+                    if settings.exchanges and 'dex' in settings.exchanges:
+                        for dex_cfg in settings.exchanges['dex']:
+                            if dex_cfg.get('name') == dex_name:
+                                dex_cfg['enabled'] = True
+                                if router_address:
+                                    dex_cfg['router_address'] = router_address
+                                if factory_address:
+                                    dex_cfg['factory_address'] = factory_address
+                                if chain:
+                                    dex_cfg['chain'] = chain
+                                break
         
         # Initialize bot with loaded settings
         bot = ArbitrageBot()
@@ -304,13 +352,15 @@ async def get_exchanges_config():
         available_cex = [
             {"name": "binance", "display_name": "Binance", "supports_testnet": True},
             {"name": "okx", "display_name": "OKX", "supports_testnet": True, "requires_passphrase": True},
-            {"name": "bybit", "display_name": "Bybit", "supports_testnet": True}
+            {"name": "bybit", "display_name": "Bybit", "supports_testnet": True},
+            {"name": "mexc", "display_name": "MEXC", "supports_testnet": False}
         ]
         
         available_dex = [
             {"name": "pancakeswap", "display_name": "PancakeSwap", "chain": "BSC"},
             {"name": "uniswap_v2", "display_name": "Uniswap V2", "chain": "Ethereum"},
-            {"name": "quickswap", "display_name": "QuickSwap", "chain": "Polygon"}
+            {"name": "quickswap", "display_name": "QuickSwap", "chain": "Polygon"},
+            {"name": "galaswap", "display_name": "Galaswap", "chain": "Gala Chain"}
         ]
         
         if not postgres_db:
@@ -396,6 +446,99 @@ async def update_exchange_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/config/dex")
+async def update_dex_config(
+    config: DEXConfig,
+    username: str = Depends(verify_credentials)
+):
+    """Update DEX exchange configuration"""
+    try:
+        # Initialize database if needed
+        if not postgres_db:
+            raise HTTPException(status_code=500, detail="Database not initialized")
+        
+        # Import API keys manager
+        from ..database.api_keys_manager import APIKeysManager
+        
+        # Initialize keys manager
+        keys_manager = APIKeysManager(postgres_db)
+        
+        # Determine chain if not provided
+        chain = config.chain
+        if not chain:
+            # Auto-detect chain based on exchange name
+            if config.exchange_name == 'pancakeswap':
+                chain = 'bsc'
+            elif config.exchange_name in ['uniswap_v2', 'uniswap_v3']:
+                chain = 'ethereum'
+            elif config.exchange_name == 'quickswap':
+                chain = 'polygon'
+            elif config.exchange_name == 'galaswap':
+                chain = 'gala'
+        
+        # Get default RPC URLs if not provided
+        rpc_url = config.rpc_url
+        if not rpc_url:
+            from ..config.settings import get_settings
+            settings = get_settings()
+            if chain == 'bsc':
+                rpc_url = settings.bsc_rpc_url or "https://bsc-dataseed1.binance.org/"
+            elif chain == 'ethereum':
+                rpc_url = settings.eth_rpc_url or ""
+            elif chain == 'polygon':
+                rpc_url = settings.polygon_rpc_url or "https://polygon-rpc.com/"
+            elif chain == 'gala':
+                rpc_url = getattr(settings, 'gala_rpc_url', '') or "https://jsonrpc.gala.games"
+        
+        # Get default router/factory addresses if not provided
+        router_address = config.router_address
+        factory_address = config.factory_address
+        
+        if not router_address or not factory_address:
+            # Use defaults from config.yaml
+            defaults = {
+                'pancakeswap': {
+                    'router': '0x10ED43C718714eb63d5aA57B78B54704E256024E',
+                    'factory': '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73'
+                },
+                'uniswap_v2': {
+                    'router': '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
+                    'factory': '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
+                },
+                'quickswap': {
+                    'router': '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
+                    'factory': '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32'
+                }
+            }
+            if config.exchange_name in defaults:
+                router_address = router_address or defaults[config.exchange_name]['router']
+                factory_address = factory_address or defaults[config.exchange_name]['factory']
+        
+        # Save DEX configuration to database
+        success = keys_manager.save_dex_keys(
+            exchange_name=config.exchange_name,
+            private_key=config.private_key,
+            wallet_address=config.wallet_address,
+            rpc_url=rpc_url,
+            router_address=router_address,
+            factory_address=factory_address,
+            chain=chain,
+            enabled=config.enabled
+        )
+        
+        if success:
+            return {
+                "status": "success", 
+                "message": f"{config.exchange_name} DEX configured and saved to database"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save DEX configuration")
+    
+    except Exception as e:
+        logger.error(f"Error updating DEX config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/config/trading")
 async def get_trading_config():
     """Get trading configuration"""
@@ -425,11 +568,50 @@ async def update_trading_config(
         settings.trading.max_trade_size_percent = config.max_trade_size_percent
         settings.trading.max_slippage_percent = config.max_slippage_percent
         
+        # Update paper trading mode if provided
+        if config.paper_trading is not None:
+            settings.bot.paper_trading = config.paper_trading
+            logger.info(f"Paper trading mode set to: {config.paper_trading}")
+        
         # TODO: Save to config file
         
         return {"status": "success", "message": "Trading config updated"}
     
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bot/trading/mode")
+async def set_trading_mode(
+    paper_trading: bool = Body(..., embed=True),
+    username: str = Depends(verify_credentials)
+):
+    """Set paper trading mode (True) or live trading mode (False)"""
+    try:
+        from ..config.settings import get_settings
+        
+        settings = get_settings()
+        
+        old_mode = settings.bot.paper_trading
+        settings.bot.paper_trading = paper_trading
+        
+        mode_name = "PAPER TRADING" if paper_trading else "LIVE TRADING"
+        logger.warning(f"Trading mode changed from {'PAPER' if old_mode else 'LIVE'} to {mode_name}")
+        
+        await broadcast_message({
+            "type": "alert",
+            "level": "warning" if not paper_trading else "info",
+            "message": f"Trading mode set to {mode_name}. Bot restart required for changes to take effect."
+        })
+        
+        return {
+            "status": "success",
+            "message": f"Trading mode set to {mode_name}",
+            "paper_trading": paper_trading,
+            "requires_restart": True
+        }
+    except Exception as e:
+        logger.error(f"Error setting trading mode: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -477,39 +659,120 @@ async def update_risk_config(
 # ==================== Market Data Routes ====================
 
 @app.get("/api/market/prices")
-async def get_current_prices():
-    """Get current prices across all exchanges"""
+async def get_current_prices(all_pairs: bool = False):
+    """
+    Get current prices across all exchanges
+    
+    Args:
+        all_pairs: If True, fetch prices for all available pairs from exchanges.
+                   If False, only show configured trading pairs.
+    """
     global bot
     
-    if not bot or not bot.price_monitor:
-        return {"error": "Bot not running"}
+    if not bot or not bot.exchanges:
+        return {"error": "Bot not running or no exchanges connected"}
     
     prices = {}
-    for symbol in bot.price_monitor.trading_pairs:
-        symbol_prices = bot.price_monitor.get_all_prices(symbol)
-        prices[symbol] = {
-            exchange: {
-                "bid": data.bid,
-                "ask": data.ask,
-                "mid": data.mid,
-                "spread": data.spread,
-                "timestamp": data.timestamp.isoformat()
-            }
-            for exchange, data in symbol_prices.items()
-        }
+    
+    if all_pairs:
+        # Fetch prices for all available pairs from each exchange
+        for exchange_name, exchange in bot.exchanges.items():
+            try:
+                # For CEX exchanges using CCXT
+                if hasattr(exchange, 'exchange') and hasattr(exchange.exchange, 'load_markets'):
+                    markets = await exchange.exchange.load_markets()
+                    # Get all active spot markets
+                    for symbol, market in markets.items():
+                        if market.get('active') and market.get('type') == 'spot':
+                            try:
+                                ticker = await exchange.get_ticker(symbol)
+                                if ticker and ticker.get('bid') and ticker.get('ask'):
+                                    if symbol not in prices:
+                                        prices[symbol] = {}
+                                    prices[symbol][exchange_name] = {
+                                        "bid": ticker.get('bid'),
+                                        "ask": ticker.get('ask'),
+                                        "mid": (ticker.get('bid') + ticker.get('ask')) / 2,
+                                        "spread": ticker.get('ask') - ticker.get('bid'),
+                                        "timestamp": ticker.get('timestamp', datetime.now()).isoformat() if hasattr(ticker.get('timestamp'), 'isoformat') else datetime.now().isoformat()
+                                    }
+                            except Exception as e:
+                                logger.debug(f"Error fetching ticker for {symbol} on {exchange_name}: {e}")
+                                continue
+                # For DEX exchanges, we can't easily get all pairs, so skip for now
+            except Exception as e:
+                logger.error(f"Error fetching markets from {exchange_name}: {e}")
+                continue
+    else:
+        # Original behavior: only configured trading pairs
+        if bot.price_monitor:
+            for symbol in bot.price_monitor.trading_pairs:
+                symbol_prices = bot.price_monitor.get_all_prices(symbol)
+                prices[symbol] = {
+                    exchange: {
+                        "bid": data.bid,
+                        "ask": data.ask,
+                        "mid": data.mid,
+                        "spread": data.spread,
+                        "timestamp": data.timestamp.isoformat()
+                    }
+                    for exchange, data in symbol_prices.items()
+                }
     
     return prices
 
 
+@app.get("/api/market/available-pairs")
+async def get_available_pairs():
+    """Get all available trading pairs from connected exchanges"""
+    global bot
+    
+    if not bot or not bot.exchanges:
+        return {"pairs": []}
+    
+    all_pairs = set()
+    
+    for exchange_name, exchange in bot.exchanges.items():
+        try:
+            # For CEX exchanges using CCXT
+            if hasattr(exchange, 'exchange') and hasattr(exchange.exchange, 'load_markets'):
+                markets = await exchange.exchange.load_markets()
+                # Get all active spot markets
+                for symbol, market in markets.items():
+                    if market.get('active') and market.get('type') == 'spot':
+                        all_pairs.add(symbol)
+        except Exception as e:
+            logger.error(f"Error fetching available pairs from {exchange_name}: {e}")
+            continue
+    
+    return {
+        "pairs": sorted(list(all_pairs)),
+        "count": len(all_pairs)
+    }
+
+
 @app.get("/api/market/opportunities")
-async def get_opportunities():
-    """Get recent arbitrage opportunities"""
+async def get_opportunities(min_profit: Optional[float] = None, limit: int = 100):
+    """
+    Get recent arbitrage opportunities
+    
+    Args:
+        min_profit: Optional minimum profit % filter (default: show all >= 0.01%)
+        limit: Maximum number of opportunities to return
+    """
     global bot
     
     if not bot or not bot.price_monitor:
         return {"opportunities": []}
     
-    opportunities = bot.price_monitor.get_recent_opportunities(limit=50)
+    opportunities = bot.price_monitor.get_recent_opportunities(limit=limit * 2)  # Get more to filter
+    
+    # Filter by minimum profit if specified, otherwise show all
+    if min_profit is not None:
+        opportunities = [opp for opp in opportunities if opp.gross_profit_percent >= min_profit]
+    
+    # Sort by profit (highest first) and limit
+    opportunities = sorted(opportunities, key=lambda x: x.gross_profit_percent, reverse=True)[:limit]
     
     return {
         "opportunities": [
@@ -519,7 +782,7 @@ async def get_opportunities():
                 "sell_exchange": opp.sell_exchange,
                 "buy_price": opp.buy_price,
                 "sell_price": opp.sell_price,
-                "profit_percent": opp.gross_profit_percent,
+                "profit_percent": round(opp.gross_profit_percent, 4),  # Show 4 decimal places for small profits
                 "timestamp": opp.timestamp.isoformat()
             }
             for opp in opportunities
@@ -671,6 +934,54 @@ async def get_risk_metrics():
     except Exception as e:
         logger.error(f"Error getting risk metrics: {e}")
         return {"error": str(e)}
+
+
+@app.post("/api/bot/trading/enable")
+async def enable_trading(username: str = Depends(verify_credentials)):
+    """Enable automatic trading"""
+    global bot
+    
+    if not bot or not bot.risk_manager:
+        raise HTTPException(status_code=400, detail="Bot not running")
+    
+    try:
+        bot.risk_manager.enable_trading()
+        logger.info("Trading enabled by user")
+        
+        await broadcast_message({
+            "type": "alert",
+            "level": "info",
+            "message": "Automatic trading has been enabled"
+        })
+        
+        return {"status": "success", "message": "Trading enabled", "trading_enabled": True}
+    except Exception as e:
+        logger.error(f"Error enabling trading: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bot/trading/disable")
+async def disable_trading(username: str = Depends(verify_credentials)):
+    """Disable automatic trading"""
+    global bot
+    
+    if not bot or not bot.risk_manager:
+        raise HTTPException(status_code=400, detail="Bot not running")
+    
+    try:
+        bot.risk_manager.disable_trading("Disabled by user")
+        logger.info("Trading disabled by user")
+        
+        await broadcast_message({
+            "type": "alert",
+            "level": "info",
+            "message": "Automatic trading has been disabled"
+        })
+        
+        return {"status": "success", "message": "Trading disabled", "trading_enabled": False}
+    except Exception as e:
+        logger.error(f"Error disabling trading: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/performance/statistics")

@@ -1,6 +1,6 @@
 """
-Bybit Exchange Connector
-Handles all interactions with Bybit API
+MEXC Exchange Connector
+Handles all interactions with MEXC API
 """
 
 import ccxt.async_support as ccxt
@@ -12,8 +12,8 @@ from ...utils.logger import get_logger
 logger = get_logger()
 
 
-class BybitConnector(BaseExchange):
-    """Bybit exchange connector using CCXT"""
+class MEXCConnector(BaseExchange):
+    """MEXC exchange connector using CCXT"""
     
     def __init__(
         self, 
@@ -22,59 +22,69 @@ class BybitConnector(BaseExchange):
         testnet: bool = False,
         enable_rate_limit: bool = True
     ):
-        super().__init__("bybit", testnet)
+        super().__init__("mexc", testnet)
         
         self.api_key = api_key
         self.api_secret = api_secret
         
         # Initialize CCXT exchange
-        self.exchange = ccxt.bybit({
+        self.exchange = ccxt.mexc({
             'apiKey': api_key,
             'secret': api_secret,
             'enableRateLimit': enable_rate_limit,
             'options': {
-                'defaultType': 'spot',
+                'defaultType': 'spot',  # spot, margin, future
+                'adjustForTimeDifference': True,
             }
         })
         
         if testnet:
             self.exchange.set_sandbox_mode(True)
-            logger.info("Bybit connector initialized in TESTNET mode")
+            logger.info("MEXC connector initialized in TESTNET mode")
         else:
-            logger.info("Bybit connector initialized for MAINNET")
+            logger.info("MEXC connector initialized for MAINNET")
     
     async def connect(self):
         """Establish connection and verify credentials"""
         try:
             await self.exchange.load_markets()
             
-            # Test connection
+            # Test connection with balance check
             balance = await self.exchange.fetch_balance()
             
             self.is_connected = True
-            logger.info(f"Successfully connected to Bybit ({'testnet' if self.testnet else 'mainnet'})")
+            logger.info(f"Successfully connected to MEXC ({'testnet' if self.testnet else 'mainnet'})")
             
         except ccxt.AuthenticationError as e:
-            logger.error(f"Bybit authentication failed: {e}")
+            logger.error(f"MEXC authentication failed: {e}")
             raise
         except ccxt.NetworkError as e:
-            logger.error(f"Bybit network error: {e}")
+            logger.error(f"MEXC network error: {e}")
             raise
         except Exception as e:
-            logger.error(f"Bybit connection error: {e}")
+            logger.error(f"MEXC connection error: {e}")
             raise
     
     async def disconnect(self):
-        """Close connection to Bybit"""
+        """Close connection to MEXC"""
         try:
             await self.exchange.close()
             self.is_connected = False
-            logger.info("Disconnected from Bybit")
+            logger.info("Disconnected from MEXC")
         except Exception as e:
-            logger.error(f"Error disconnecting from Bybit: {e}")
+            logger.error(f"Error disconnecting from MEXC: {e}")
     
     async def get_order_book(self, symbol: str, depth: int = 10) -> OrderBook:
-        """Fetch order book from Bybit"""
+        """
+        Fetch order book from MEXC
+        
+        Args:
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            depth: Order book depth (5, 10, 20, 50, 100, 500, 1000, 5000)
+        
+        Returns:
+            OrderBook object
+        """
         try:
             order_book = await self.exchange.fetch_order_book(symbol, limit=depth)
             
@@ -102,7 +112,7 @@ class BybitConnector(BaseExchange):
             )
         
         except Exception as e:
-            logger.error(f"Error fetching Bybit order book for {symbol}: {e}")
+            logger.error(f"Error fetching MEXC order book for {symbol}: {e}")
             raise
     
     async def get_ticker(self, symbol: str) -> Dict:
@@ -130,7 +140,7 @@ class BybitConnector(BaseExchange):
                 'timestamp': timestamp
             }
         except Exception as e:
-            logger.error(f"Error fetching Bybit ticker for {symbol}: {e}")
+            logger.error(f"Error fetching MEXC ticker for {symbol}: {e}")
             raise
     
     async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Balance]:
@@ -141,6 +151,7 @@ class BybitConnector(BaseExchange):
             balances = {}
             
             if asset:
+                # Return specific asset
                 if asset in balance_data:
                     balances[asset] = Balance(
                         asset=asset,
@@ -148,6 +159,7 @@ class BybitConnector(BaseExchange):
                         locked=balance_data[asset]['used']
                     )
             else:
+                # Return all non-zero balances
                 for currency, info in balance_data.items():
                     if isinstance(info, dict) and info.get('total', 0) > 0:
                         balances[currency] = Balance(
@@ -159,7 +171,7 @@ class BybitConnector(BaseExchange):
             return balances
         
         except Exception as e:
-            logger.error(f"Error fetching Bybit balance: {e}")
+            logger.error(f"Error fetching MEXC balance: {e}")
             raise
     
     async def place_market_order(
@@ -168,9 +180,9 @@ class BybitConnector(BaseExchange):
         side: str, 
         quantity: float
     ) -> Order:
-        """Place market order on Bybit"""
+        """Place market order on MEXC"""
         try:
-            logger.info(f"Placing Bybit MARKET {side} order: {quantity} {symbol}")
+            logger.info(f"Placing MEXC MARKET {side} order: {quantity} {symbol}")
             
             order = await self.exchange.create_market_order(
                 symbol=symbol,
@@ -181,13 +193,13 @@ class BybitConnector(BaseExchange):
             return self._parse_order(order)
         
         except ccxt.InsufficientFunds as e:
-            logger.error(f"Insufficient funds for Bybit order: {e}")
+            logger.error(f"Insufficient funds for MEXC order: {e}")
             raise
         except ccxt.InvalidOrder as e:
-            logger.error(f"Invalid Bybit order: {e}")
+            logger.error(f"Invalid MEXC order: {e}")
             raise
         except Exception as e:
-            logger.error(f"Error placing Bybit market order: {e}")
+            logger.error(f"Error placing MEXC market order: {e}")
             raise
     
     async def place_limit_order(
@@ -197,9 +209,9 @@ class BybitConnector(BaseExchange):
         price: float,
         quantity: float
     ) -> Order:
-        """Place limit order on Bybit"""
+        """Place limit order on MEXC"""
         try:
-            logger.info(f"Placing Bybit LIMIT {side} order: {quantity} {symbol} @ {price}")
+            logger.info(f"Placing MEXC LIMIT {side} order: {quantity} {symbol} @ {price}")
             
             order = await self.exchange.create_limit_order(
                 symbol=symbol,
@@ -211,17 +223,17 @@ class BybitConnector(BaseExchange):
             return self._parse_order(order)
         
         except Exception as e:
-            logger.error(f"Error placing Bybit limit order: {e}")
+            logger.error(f"Error placing MEXC limit order: {e}")
             raise
     
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order"""
         try:
             await self.exchange.cancel_order(order_id, symbol)
-            logger.info(f"Cancelled Bybit order {order_id} for {symbol}")
+            logger.info(f"Cancelled MEXC order {order_id} for {symbol}")
             return True
         except Exception as e:
-            logger.error(f"Error cancelling Bybit order {order_id}: {e}")
+            logger.error(f"Error cancelling MEXC order {order_id}: {e}")
             return False
     
     async def get_order_status(self, symbol: str, order_id: str) -> Order:
@@ -230,7 +242,7 @@ class BybitConnector(BaseExchange):
             order = await self.exchange.fetch_order(order_id, symbol)
             return self._parse_order(order)
         except Exception as e:
-            logger.error(f"Error fetching Bybit order status: {e}")
+            logger.error(f"Error fetching MEXC order status: {e}")
             raise
     
     async def get_trading_fees(self, symbol: str) -> Dict[str, float]:
@@ -244,12 +256,12 @@ class BybitConnector(BaseExchange):
                     'taker': fees[symbol]['taker']
                 }
             
-            # Default Bybit fees
-            return {'maker': 0.001, 'taker': 0.001}  # 0.1%
+            # Default MEXC fees if not found (typically 0.2% maker, 0.2% taker)
+            return {'maker': 0.002, 'taker': 0.002}  # 0.2%
         
         except Exception as e:
-            logger.warning(f"Could not fetch Bybit fees, using defaults: {e}")
-            return {'maker': 0.001, 'taker': 0.001}
+            logger.warning(f"Could not fetch MEXC fees, using defaults: {e}")
+            return {'maker': 0.002, 'taker': 0.002}
     
     async def get_min_order_size(self, symbol: str) -> float:
         """Get minimum order size"""
@@ -263,7 +275,7 @@ class BybitConnector(BaseExchange):
             return 0.0
         
         except Exception as e:
-            logger.error(f"Error fetching Bybit min order size: {e}")
+            logger.error(f"Error fetching MEXC min order size: {e}")
             return 0.0
     
     async def get_exchange_info(self, symbol: str) -> Dict:
@@ -272,7 +284,7 @@ class BybitConnector(BaseExchange):
             markets = await self.exchange.load_markets()
             return markets.get(symbol, {})
         except Exception as e:
-            logger.error(f"Error fetching Bybit exchange info: {e}")
+            logger.error(f"Error fetching MEXC exchange info: {e}")
             return {}
     
     def _parse_order(self, order_data: Dict) -> Order:
@@ -302,4 +314,13 @@ class BybitConnector(BaseExchange):
             commission=order_data.get('fee', {}).get('cost'),
             commission_asset=order_data.get('fee', {}).get('currency')
         )
+    
+    async def get_server_time(self) -> int:
+        """Get MEXC server time"""
+        try:
+            time_data = await self.exchange.fetch_time()
+            return time_data
+        except Exception as e:
+            logger.error(f"Error fetching MEXC server time: {e}")
+            return 0
 

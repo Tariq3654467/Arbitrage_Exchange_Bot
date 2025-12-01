@@ -26,6 +26,18 @@ class ExchangeConfig(BaseModel):
     enabled: bool = True
 
 
+class DEXConfig(BaseModel):
+    """DEX exchange configuration"""
+    exchange_name: str
+    private_key: str
+    wallet_address: Optional[str] = None  # For Galaswap
+    rpc_url: Optional[str] = None
+    router_address: Optional[str] = None
+    factory_address: Optional[str] = None
+    chain: Optional[str] = None  # 'bsc', 'ethereum', 'polygon', 'gala'
+    enabled: bool = True
+
+
 class StartBotRequest(BaseModel):
     """Optional API keys passed directly from dashboard (non-persistent)"""
     exchanges: Optional[List[ExchangeConfig]] = None
@@ -37,6 +49,7 @@ class TradingConfig(BaseModel):
     max_trade_size_percent: float = Field(gt=0, le=100)
     max_slippage_percent: float = Field(gt=0, le=100)
     order_timeout_seconds: int = Field(gt=0)
+    paper_trading: Optional[bool] = None  # Optional, can be updated separately
 
 
 class RiskConfig(BaseModel):

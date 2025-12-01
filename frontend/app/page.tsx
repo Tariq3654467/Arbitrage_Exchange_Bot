@@ -20,9 +20,16 @@ import {
   ExchangesResponse,
   ConfiguredExchange,
   EphemeralExchange,
+  DEXConfig,
 } from '@/lib/api';
 import StatusIndicator from '@/components/StatusIndicator';
 import { useWebSocket } from '@/lib/useWebSocket';
+import PriceChart from '@/components/PriceChart';
+import PriceComparisonChart from '@/components/PriceComparisonChart';
+import SpreadChart from '@/components/SpreadChart';
+import OpportunityChart from '@/components/OpportunityChart';
+import OpportunityDistributionChart from '@/components/OpportunityDistributionChart';
+import ExchangePairChart from '@/components/ExchangePairChart';
 
 type TabId = 'market' | 'opportunities' | 'trades' | 'balances' | 'config';
 
@@ -238,6 +245,34 @@ export default function DashboardPage() {
     }
   };
 
+  const handleTogglePaperTrading = async () => {
+    if (!botStatus) return;
+    const newMode = !botStatus.paper_trading;
+    const modeName = newMode ? 'Paper Trading' : 'Live Trading';
+    
+    if (!newMode && !window.confirm(
+      `⚠️ WARNING: Switch to LIVE TRADING?\n\n` +
+      `This will use REAL FUNDS. Make sure you understand the risks.\n\n` +
+      `The bot will need to be restarted for this change to take effect.`
+    )) {
+      return;
+    }
+    
+    try {
+      const res = await botApi.setTradingMode(newMode);
+      pushAlert(
+        res.status === 'success' ? 'info' : 'error',
+        res.message || `Failed to switch to ${modeName}`
+      );
+      // Refresh bot status to get updated paper_trading value
+      if (res.status === 'success') {
+        setTimeout(() => loadDashboard(false), 1000);
+      }
+    } catch (e: any) {
+      pushAlert('error', e?.message || `Failed to switch to ${modeName}`);
+    }
+  };
+
   const refreshExchanges = async () => {
     try {
       const data = await configApi.getExchanges();
@@ -326,6 +361,71 @@ export default function DashboardPage() {
                 🚨 Emergency Stop
               </button>
             </div>
+            
+            {/* Trading Mode Controls */}
+            {botStatus?.is_running && (
+              <div className="mt-4 space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-medium text-slate-200">Auto-Trading</div>
+                    <div className="text-[10px] text-slate-400">
+                      {riskMetrics?.trading_enabled
+                        ? 'Bot will automatically execute trades when profitable opportunities are found'
+                        : 'Trades are disabled - bot will only monitor opportunities'}
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        if (riskMetrics?.trading_enabled) {
+                          await botApi.disableTrading();
+                          pushAlert('info', 'Auto-trading disabled');
+                        } else {
+                          await botApi.enableTrading();
+                          pushAlert('success', 'Auto-trading enabled');
+                        }
+                        // Refresh data
+                        const [risk] = await Promise.allSettled([riskApi.getMetrics()]);
+                        if (risk.status === 'fulfilled' && !('error' in risk.value)) {
+                          setRiskMetrics(risk.value);
+                        }
+                      } catch (e: any) {
+                        pushAlert('error', e?.response?.data?.detail || 'Failed to toggle trading');
+                      }
+                    }}
+                    className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      riskMetrics?.trading_enabled
+                        ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    {riskMetrics?.trading_enabled ? '✓ Enabled' : 'Disabled'}
+                  </button>
+                </div>
+                <div className="flex items-center justify-between border-t border-slate-800 pt-2">
+                  <div>
+                    <div className="text-xs font-medium text-slate-200">Trading Mode</div>
+                    <div className="text-[10px] text-slate-400">
+                      {botStatus.paper_trading
+                        ? 'Paper Trading (simulated) - No real funds are used'
+                        : 'Live Trading - Real funds will be used'}
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleTogglePaperTrading}
+                    className={`rounded-md px-2 py-1 text-[10px] font-semibold uppercase transition-colors cursor-pointer ${
+                      botStatus.paper_trading
+                        ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'
+                        : 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
+                    }`}
+                    title={`Click to switch to ${botStatus.paper_trading ? 'Live' : 'Paper'} Trading`}
+                  >
+                    {botStatus.paper_trading ? 'Paper' : 'Live'}
+                  </button>
+                </div>
+              </div>
+            )}
+            
             <p className="mt-1 text-xs text-slate-500">
               Exchange keys and risk settings are managed from the Configuration tab.
             </p>
@@ -491,27 +591,101 @@ function MetricCard({
   );
 }
 
+interface PriceHistoryPoint {
+  time: string;
+  [key: string]: string | number;
+}
+
 function MarketTab() {
   const [prices, setPrices] = useState<Record<string, any>>({});
+  const [priceHistory, setPriceHistory] = useState<Record<string, PriceHistoryPoint[]>>({});
   const [loading, setLoading] = useState(true);
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const [showAllPairs, setShowAllPairs] = useState(false);
+  const maxHistoryPoints = 50; // Keep last 50 data points
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
         setLoading(true);
-        const data = await marketApi.getPrices();
+        const data = await marketApi.getPrices(showAllPairs);
         if (!cancelled) {
           setPrices(data || {});
+          
+          // Update price history
+          const now = new Date().toISOString();
+          setPriceHistory((prev) => {
+            const updated = { ...prev };
+            const symbols = Object.keys(data || {});
+            
+            symbols.forEach((symbol) => {
+              const exchanges = (data as any)[symbol] as Record<string, any>;
+              const exchangeNames = Object.keys(exchanges);
+              
+              if (!updated[symbol]) {
+                updated[symbol] = [];
+              }
+              
+              // Create new data point
+              const newPoint: PriceHistoryPoint = { time: now };
+              exchangeNames.forEach((ex) => {
+                const exData = exchanges[ex];
+                if (exData) {
+                  if (typeof exData.bid === 'number') {
+                    newPoint[`${ex}_bid`] = exData.bid;
+                  }
+                  if (typeof exData.ask === 'number') {
+                    newPoint[`${ex}_ask`] = exData.ask;
+                  }
+                  if (typeof exData.mid === 'number') {
+                    newPoint[`${ex}_mid`] = exData.mid;
+                  }
+                  if (typeof exData.spread === 'number') {
+                    // Calculate spread percentage: (spread / mid) * 100
+                    const mid = exData.mid || ((exData.bid + exData.ask) / 2);
+                    if (mid > 0) {
+                      newPoint[`${ex}_spread`] = (exData.spread / mid) * 100;
+                    } else {
+                      newPoint[`${ex}_spread`] = 0;
+                    }
+                  }
+                }
+              });
+              
+              // Add new point and limit history
+              updated[symbol] = [...(updated[symbol] || []), newPoint].slice(-maxHistoryPoints);
+            });
+            
+            return updated;
+          });
+          
+          // Auto-select first symbol if none selected
+          if (!selectedSymbol && Object.keys(data || {}).length > 0) {
+            setSelectedSymbol(Object.keys(data || {})[0]);
+          }
         }
       } finally {
         if (!cancelled) setLoading(false);
       }
     };
+    
     load();
-  }, []);
+    
+    // Auto-refresh every 2 seconds
+    const interval = setInterval(() => {
+      if (!cancelled) {
+        load();
+      }
+    }, 2000);
+    
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [showAllPairs]);
 
-  if (loading) {
+  if (loading && Object.keys(prices).length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-8 text-sm text-slate-400">
         <span>Loading market data…</span>
@@ -529,92 +703,320 @@ function MarketTab() {
     );
   }
 
+  const currentSymbol = selectedSymbol || symbols[0];
+  const exchanges = prices[currentSymbol] as Record<string, any>;
+  const exchangeNames = Object.keys(exchanges || {});
+  const history = priceHistory[currentSymbol] || [];
+
+  // Prepare comparison data for bar chart
+  const comparisonData = exchangeNames.map((ex) => {
+    const data = exchanges[ex];
+    return {
+      exchange: ex,
+      bid: data?.bid || 0,
+      ask: data?.ask || 0,
+      mid: data?.mid || 0,
+    };
+  });
+
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      {symbols.map((symbol) => {
-        const exchanges = prices[symbol] as Record<string, any>;
-        return (
-          <div
+    <div className="space-y-6">
+      {/* Controls */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={showAllPairs}
+              onChange={(e) => setShowAllPairs(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-600 bg-slate-900"
+            />
+            Show all available pairs ({symbols.length} pairs)
+          </label>
+        </div>
+        <div className="text-xs text-slate-500">
+          {showAllPairs 
+            ? 'Showing all trading pairs from connected exchanges'
+            : 'Showing only configured trading pairs'}
+        </div>
+      </div>
+      
+      {/* Symbol selector */}
+      <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
+        {symbols.map((symbol) => (
+          <button
             key={symbol}
-            className="rounded-xl border border-slate-800 bg-slate-950/40 p-4"
+            onClick={() => setSelectedSymbol(symbol)}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              selectedSymbol === symbol
+                ? 'bg-primary-500 text-white'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+            }`}
           >
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-100">{symbol}</h3>
-              <span className="text-[10px] uppercase tracking-wide text-slate-500">
-                {Object.keys(exchanges).length} exchanges
-              </span>
-            </div>
-            <div className="space-y-2 text-xs">
-              {Object.entries(exchanges).map(([ex, data]) => {
-                const bid =
-                  data && typeof data.bid === 'number'
-                    ? data.bid.toFixed(4)
-                    : '—';
-                const ask =
-                  data && typeof data.ask === 'number'
-                    ? data.ask.toFixed(4)
-                    : '—';
-                return (
-                  <div
-                    key={ex}
-                    className="flex items-center justify-between rounded-md bg-slate-900/80 px-2 py-1.5"
-                  >
-                    <span className="font-medium text-slate-200">{ex}</span>
-                    <span className="tabular-nums text-slate-300">
-                      B ${bid} · A ${ask}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })}
+            {symbol}
+          </button>
+        ))}
+      </div>
+
+      {/* Charts Section */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* Price Trends Chart */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <PriceChart
+            data={history}
+            exchanges={exchangeNames}
+            dataKey="mid"
+            title={`Mid Price Trend: ${currentSymbol}`}
+          />
+        </div>
+
+        {/* Price Comparison Chart */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <PriceComparisonChart data={comparisonData} symbol={currentSymbol} />
+        </div>
+
+        {/* Bid/Ask Trends */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <PriceChart
+            data={history}
+            exchanges={exchangeNames}
+            dataKey="bid"
+            title={`Bid Price Trend: ${currentSymbol}`}
+          />
+        </div>
+
+        {/* Spread Chart */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <SpreadChart
+            data={history}
+            exchanges={exchangeNames}
+            title={`Spread Trend: ${currentSymbol}`}
+          />
+        </div>
+      </div>
+
+      {/* Current Prices Table */}
+      <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+        <h3 className="mb-4 text-sm font-semibold text-slate-100">
+          Current Prices: {currentSymbol}
+        </h3>
+        <div className="space-y-2 text-xs">
+          {Object.entries(exchanges || {}).map(([ex, data]) => {
+            const bid =
+              data && typeof data.bid === 'number'
+                ? data.bid.toFixed(4)
+                : '—';
+            const ask =
+              data && typeof data.ask === 'number'
+                ? data.ask.toFixed(4)
+                : '—';
+            const mid =
+              data && typeof data.mid === 'number'
+                ? data.mid.toFixed(4)
+                : '—';
+            const spread =
+              data && typeof data.spread === 'number'
+                ? data.spread.toFixed(4)
+                : '—';
+            return (
+              <div
+                key={ex}
+                className="flex items-center justify-between rounded-md bg-slate-900/80 px-3 py-2"
+              >
+                <span className="font-medium text-slate-200">{ex}</span>
+                <div className="flex gap-4 tabular-nums text-slate-300">
+                  <span>Bid: ${bid}</span>
+                  <span>Ask: ${ask}</span>
+                  <span>Mid: ${mid}</span>
+                  <span>Spread: ${spread}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
 
 function OpportunitiesTab({ opportunities }: { opportunities: Opportunity[] }) {
+  // Prepare chart data
+  const profitTrendData = opportunities
+    .slice()
+    .reverse()
+    .map((opp) => ({
+      time: opp.timestamp,
+      profit_percent: opp.profit_percent,
+      symbol: opp.symbol,
+    }))
+    .slice(0, 100); // Last 100 opportunities
+
+  // Group by symbol
+  const symbolGroups = opportunities.reduce((acc, opp) => {
+    if (!acc[opp.symbol]) {
+      acc[opp.symbol] = { count: 0, total_profit: 0 };
+    }
+    acc[opp.symbol].count++;
+    acc[opp.symbol].total_profit += opp.profit_percent;
+    return acc;
+  }, {} as Record<string, { count: number; total_profit: number }>);
+
+  const distributionData = Object.entries(symbolGroups)
+    .map(([symbol, data]) => ({
+      symbol,
+      count: data.count,
+      avg_profit: data.total_profit / data.count,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10); // Top 10 symbols
+
+  // Group by exchange pair
+  const pairGroups = opportunities.reduce((acc, opp) => {
+    const pair = `${opp.buy_exchange} → ${opp.sell_exchange}`;
+    if (!acc[pair]) {
+      acc[pair] = { count: 0, total_profit: 0 };
+    }
+    acc[pair].count++;
+    acc[pair].total_profit += opp.profit_percent;
+    return acc;
+  }, {} as Record<string, { count: number; total_profit: number }>);
+
+  const pairData = Object.entries(pairGroups)
+    .map(([pair, data]) => ({
+      pair,
+      count: data.count,
+      avg_profit: data.total_profit / data.count,
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10); // Top 10 pairs
+
   if (!opportunities.length) {
     return (
-      <p className="text-sm text-slate-400">
-        No arbitrage opportunities found yet. Let the bot run for a while.
-      </p>
+      <div className="space-y-4">
+        <p className="text-sm text-slate-400">
+          No arbitrage opportunities found yet. Let the bot run for a while.
+        </p>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-6">
+          <h3 className="mb-2 text-sm font-semibold text-slate-200">
+            What to expect:
+          </h3>
+          <ul className="list-inside list-disc space-y-1 text-xs text-slate-400">
+            <li>Opportunities appear when price differences between exchanges exceed your profit threshold</li>
+            <li>Charts will show profit trends, symbol distribution, and exchange pair analysis</li>
+            <li>Make sure multiple exchanges are connected and the bot is actively monitoring prices</li>
+          </ul>
+        </div>
+      </div>
     );
   }
 
+  const totalOpportunities = opportunities.length;
+  const avgProfit = opportunities.reduce((sum, opp) => sum + opp.profit_percent, 0) / totalOpportunities;
+  const maxProfit = Math.max(...opportunities.map((opp) => opp.profit_percent));
+
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-slate-800 text-sm">
-        <thead className="bg-slate-900/80">
-          <tr>
-            <Th>Time</Th>
-            <Th>Symbol</Th>
-            <Th>Buy From</Th>
-            <Th>Sell To</Th>
-            <Th>Buy Price</Th>
-            <Th>Sell Price</Th>
-            <Th>Profit %</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-800">
-          {opportunities.map((opp) => {
-            const profitClass =
-              opp.profit_percent >= 1 ? 'text-emerald-300' : 'text-slate-200';
-            return (
-              <tr key={`${opp.symbol}-${opp.timestamp}`} className="hover:bg-slate-900/60">
-                <Td>{new Date(opp.timestamp).toLocaleTimeString()}</Td>
-                <Td className="font-semibold">{opp.symbol}</Td>
-                <Td>{opp.buy_exchange}</Td>
-                <Td>{opp.sell_exchange}</Td>
-                <Td>${opp.buy_price.toFixed(4)}</Td>
-                <Td>${opp.sell_price.toFixed(4)}</Td>
-                <Td className={profitClass}>{opp.profit_percent.toFixed(2)}%</Td>
+    <div className="space-y-6">
+      {/* Summary Cards */}
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div className="text-xs text-slate-400">Total Opportunities</div>
+          <div className="mt-1 text-2xl font-bold text-slate-100">{totalOpportunities}</div>
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div className="text-xs text-slate-400">Average Profit</div>
+          <div className="mt-1 text-2xl font-bold text-emerald-400">
+            {avgProfit.toFixed(2)}%
+          </div>
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <div className="text-xs text-slate-400">Max Profit</div>
+          <div className="mt-1 text-2xl font-bold text-emerald-300">
+            {maxProfit.toFixed(2)}%
+          </div>
+        </div>
+      </div>
+
+      {/* Charts Section */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* Profit Trend Chart */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <OpportunityChart
+            data={profitTrendData}
+            title="Profit Trend Over Time"
+          />
+        </div>
+
+        {/* Symbol Distribution Chart */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+          <OpportunityDistributionChart
+            data={distributionData}
+            title="Opportunities by Symbol"
+          />
+        </div>
+
+        {/* Exchange Pair Chart */}
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4 lg:col-span-2">
+          <ExchangePairChart
+            data={pairData}
+            title="Top Exchange Pairs (Buy → Sell)"
+          />
+        </div>
+      </div>
+
+      {/* Opportunities Table */}
+      <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+        <h3 className="mb-4 text-sm font-semibold text-slate-100">
+          Recent Opportunities ({opportunities.length})
+        </h3>
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-800 text-sm">
+            <thead className="bg-slate-900/80">
+              <tr>
+                <Th>Time</Th>
+                <Th>Symbol</Th>
+                <Th>Buy From</Th>
+                <Th>Sell To</Th>
+                <Th>Buy Price</Th>
+                <Th>Sell Price</Th>
+                <Th>Profit %</Th>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {opportunities.slice(0, 20).map((opp, idx) => {
+                const profitClass =
+                  opp.profit_percent >= 1
+                    ? 'text-emerald-300 font-semibold'
+                    : opp.profit_percent >= 0.5
+                    ? 'text-emerald-400'
+                    : 'text-slate-200';
+                return (
+                  <tr
+                    key={`${opp.symbol}-${opp.timestamp}-${idx}`}
+                    className="hover:bg-slate-900/60"
+                  >
+                    <Td>{new Date(opp.timestamp).toLocaleTimeString()}</Td>
+                    <Td className="font-semibold">{opp.symbol}</Td>
+                    <Td>{opp.buy_exchange}</Td>
+                    <Td>{opp.sell_exchange}</Td>
+                    <Td>${opp.buy_price.toFixed(4)}</Td>
+                    <Td>${opp.sell_price.toFixed(4)}</Td>
+                    <Td className={profitClass}>
+                      {opp.profit_percent < 0.1 
+                        ? opp.profit_percent.toFixed(4) 
+                        : opp.profit_percent.toFixed(2)}%
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {opportunities.length > 20 && (
+          <p className="mt-3 text-xs text-slate-400">
+            Showing 20 most recent opportunities. Total: {opportunities.length}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -749,22 +1151,93 @@ function ConfigTab({
     exchangesConfig?.configured_exchanges || [];
 
   const handleSaveExchange = async () => {
-    if (!apiKey || !apiSecret) {
-      // lightweight client-side validation
+    if (!selectedCex) {
       return;
     }
-    setSavingExchange(true);
-    const existing = ephemeralExchanges.filter((e) => e.exchange_name !== selectedCex);
-    const updated: EphemeralExchange = {
-      exchange_name: selectedCex,
-      api_key: apiKey,
-      api_secret: apiSecret,
-      passphrase: passphrase || null,
-      testnet: false,
-      enabled: enableExchange,
-    };
-    setEphemeralExchanges([...existing, updated]);
-    setSavingExchange(false);
+    
+    // For CEX, require API key and secret
+    if (exchangeType === 'cex') {
+      if (!apiKey || !apiSecret) {
+        return;
+      }
+      
+      setSavingExchange(true);
+      try {
+        await configApi.saveExchange({
+          exchange_name: selectedCex,
+          api_key: apiKey,
+          api_secret: apiSecret,
+          passphrase: passphrase || undefined,
+          testnet: false,
+          enabled: enableExchange,
+        });
+        
+        // Also add to ephemeral list for immediate use
+        const existing = ephemeralExchanges.filter((e) => e.exchange_name !== selectedCex);
+        const updated: EphemeralExchange = {
+          exchange_name: selectedCex,
+          api_key: apiKey,
+          api_secret: apiSecret,
+          passphrase: passphrase || null,
+          testnet: false,
+          enabled: enableExchange,
+        };
+        setEphemeralExchanges([...existing, updated]);
+        
+        // Clear form
+        setApiKey('');
+        setApiSecret('');
+        setPassphrase('');
+        
+        // Refresh exchanges list
+        await onRefreshExchanges();
+      } catch (e: any) {
+        alert(`Failed to save: ${e?.message || 'Unknown error'}`);
+      } finally {
+        setSavingExchange(false);
+      }
+      return;
+    }
+    
+    // For DEX, require private key
+    if (exchangeType === 'dex') {
+      if (!apiKey) {
+        alert('Please enter your wallet private key');
+        return;
+      }
+      
+      setSavingExchange(true);
+      try {
+        // Determine chain
+        let chain: string | undefined;
+        if (selectedCex === 'pancakeswap') chain = 'bsc';
+        else if (selectedCex === 'uniswap_v2') chain = 'ethereum';
+        else if (selectedCex === 'quickswap') chain = 'polygon';
+        else if (selectedCex === 'galaswap') chain = 'gala';
+        
+        await configApi.saveDEX({
+          exchange_name: selectedCex,
+          private_key: apiKey,
+          wallet_address: selectedCex === 'galaswap' ? passphrase : undefined,
+          rpc_url: apiSecret || undefined,
+          chain: chain,
+          enabled: enableExchange,
+        });
+        
+        // Clear form
+        setApiKey('');
+        setApiSecret('');
+        setPassphrase('');
+        
+        // Refresh exchanges list
+        await onRefreshExchanges();
+      } catch (e: any) {
+        alert(`Failed to save DEX config: ${e?.message || 'Unknown error'}`);
+      } finally {
+        setSavingExchange(false);
+      }
+      return;
+    }
   };
 
   const handleToggleExchange = async (ex: ConfiguredExchange) => {
@@ -781,10 +1254,24 @@ function ConfigTab({
     <div className="grid gap-6 md:grid-cols-3">
       {/* Exchange API keys */}
       <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-950/60 p-4 md:col-span-1">
-        <h3 className="text-sm font-semibold text-slate-100">Exchange API Keys</h3>
+        <h3 className="text-sm font-semibold text-slate-100">Exchange Configuration</h3>
         <p className="text-xs text-slate-500">
-          Add or update API keys for your centralized exchanges. Keys are stored encrypted in the backend database.
+          Configure CEX (API keys) or DEX (wallet keys, RPC URLs). All credentials are encrypted and stored securely in the database.
         </p>
+        <label className="block text-xs font-medium text-slate-300">
+          Exchange Type
+          <select
+            value={exchangeType}
+            onChange={(e) => {
+              setExchangeType(e.target.value as 'cex' | 'dex');
+              setSelectedCex('');
+            }}
+            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
+          >
+            <option value="cex">Centralized Exchange (CEX)</option>
+            <option value="dex">Decentralized Exchange (DEX)</option>
+          </select>
+        </label>
         <label className="block text-xs font-medium text-slate-300">
           Exchange
           <select
@@ -792,30 +1279,42 @@ function ConfigTab({
             onChange={(e) => setSelectedCex(e.target.value)}
             className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
           >
-            <option value="binance">Binance</option>
-            <option value="okx">OKX</option>
-            <option value="bybit">Bybit</option>
+            <option value="">Select an exchange...</option>
+            {exchangeType === 'cex' && exchangesConfig?.available_cex?.map((ex) => (
+              <option key={ex.name} value={ex.name}>
+                {ex.display_name}
+              </option>
+            ))}
+            {exchangeType === 'dex' && exchangesConfig?.available_dex?.map((ex) => (
+              <option key={ex.name} value={ex.name}>
+                {ex.display_name} ({ex.chain})
+              </option>
+            ))}
           </select>
         </label>
-        <label className="block text-xs font-medium text-slate-300">
-          API Key
-          <input
-            type="text"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
-          />
-        </label>
-        <label className="block text-xs font-medium text-slate-300">
-          API Secret
-          <input
-            type="password"
-            value={apiSecret}
-            onChange={(e) => setApiSecret(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
-          />
-        </label>
-        {selectedCex === 'okx' && (
+        {exchangeType === 'cex' && (
+          <>
+            <label className="block text-xs font-medium text-slate-300">
+              API Key
+              <input
+                type="text"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
+              />
+            </label>
+            <label className="block text-xs font-medium text-slate-300">
+              API Secret
+              <input
+                type="password"
+                value={apiSecret}
+                onChange={(e) => setApiSecret(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
+              />
+            </label>
+          </>
+        )}
+        {selectedCex === 'okx' && exchangeType === 'cex' && (
           <label className="block text-xs font-medium text-slate-300">
             Passphrase (OKX)
             <input
@@ -825,6 +1324,77 @@ function ConfigTab({
               className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
             />
           </label>
+        )}
+        {exchangeType === 'dex' && (
+          <>
+            <label className="block text-xs font-medium text-slate-300">
+              Wallet Private Key
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="0x..."
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
+              />
+              <p className="mt-1 text-[10px] text-slate-500">
+                Your wallet private key (starts with 0x). Keep this secure!
+              </p>
+            </label>
+            {selectedCex === 'galaswap' && (
+              <label className="block text-xs font-medium text-slate-300">
+                Gala Wallet Address
+                <input
+                  type="text"
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  placeholder="0x..."
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
+                />
+                <p className="mt-1 text-[10px] text-slate-500">
+                  Your Gala wallet address (public key)
+                </p>
+              </label>
+            )}
+            <label className="block text-xs font-medium text-slate-300">
+              RPC URL (Optional - uses defaults if empty)
+              <input
+                type="text"
+                value={apiSecret}
+                onChange={(e) => setApiSecret(e.target.value)}
+                placeholder="https://..."
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-primary-500/40 focus:ring"
+              />
+              <p className="mt-1 text-[10px] text-slate-500">
+                Blockchain RPC endpoint. Leave empty to use default public RPCs.
+              </p>
+            </label>
+            <details className="rounded-lg border border-slate-700 bg-slate-900/50 p-2 text-xs">
+              <summary className="cursor-pointer font-medium text-slate-300">
+                Advanced: Router & Factory Addresses (Optional)
+              </summary>
+              <div className="mt-2 space-y-2">
+                <label className="block text-xs font-medium text-slate-300">
+                  Router Address
+                  <input
+                    type="text"
+                    placeholder="0x..."
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 outline-none"
+                  />
+                </label>
+                <label className="block text-xs font-medium text-slate-300">
+                  Factory Address
+                  <input
+                    type="text"
+                    placeholder="0x..."
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100 outline-none"
+                  />
+                </label>
+                <p className="text-[10px] text-slate-500">
+                  Default addresses are used if not specified. Only change if you know what you're doing.
+                </p>
+              </div>
+            </details>
+          </>
         )}
         <label className="mt-1 flex items-center gap-2 text-xs text-slate-300">
           <input

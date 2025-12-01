@@ -49,6 +49,13 @@ exchanges:
       order_type: market
       max_latency_ms: 50
       websocket_enabled: true
+      
+    - name: mexc
+      enabled: false      # Enable in dashboard after adding API keys
+      testnet: false      # MEXC doesn't have testnet
+      order_type: market
+      max_latency_ms: 50
+      websocket_enabled: true
 
 # ----- DEX EXCHANGES -----
 # Disabled by default - enable in dashboard after adding private keys
@@ -77,9 +84,11 @@ exchanges:
       
     - name: galaswap
       enabled: false      # Enable in dashboard after adding private key
-      chain: ethereum      # Update to 'gala' if Galaswap runs on Gala Chain
+      chain: gala          # 'gala' for Gala Chain (recommended) or 'ethereum' if available
       router_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap router address
       factory_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap factory address
+      # Note: Galaswap runs on Gala Chain. Get contract addresses from Gala Games documentation.
+      # You'll also need Gala Chain RPC URL and a wallet private key.
 
 # ----- BLOCKCHAIN NETWORKS -----
 networks:
@@ -103,6 +112,13 @@ networks:
     max_gas_price_gwei: 500
     testnet_chain_id: 80001  # Mumbai testnet
     testnet_rpc_url: "https://matic-mumbai.chainstacklabs.com"
+    
+  gala:
+    chain_id: 33139  # Gala Chain mainnet (update if different)
+    gas_price_strategy: fast
+    max_gas_price_gwei: 100
+    rpc_url: "https://mainnet.galachain.io"  # Update with actual Gala Chain RPC URL
+    # Note: Get RPC URL from Gala Games documentation or support
 
 # ----- TRADING PAIRS -----
 # Format: BASE/QUOTE

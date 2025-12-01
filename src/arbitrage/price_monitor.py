@@ -62,7 +62,8 @@ class PriceMonitor:
         exchanges: Dict[str, BaseExchange],
         trading_pairs: List[str],
         update_interval: float = 0.1,  # 100ms
-        min_profit_threshold: float = 0.5
+        min_profit_threshold: float = 0.5,
+        min_display_threshold: float = 0.01  # Show all opportunities >= 0.01% in dashboard
     ):
         """
         Initialize price monitor
@@ -71,12 +72,14 @@ class PriceMonitor:
             exchanges: Dictionary of exchange_name -> exchange_connector
             trading_pairs: List of trading pairs to monitor
             update_interval: Price update interval in seconds
-            min_profit_threshold: Minimum profit % to consider opportunity
+            min_profit_threshold: Minimum profit % to execute trades (for callbacks)
+            min_display_threshold: Minimum profit % to show in dashboard (lower threshold)
         """
         self.exchanges = exchanges
         self.trading_pairs = trading_pairs
         self.update_interval = update_interval
-        self.min_profit_threshold = min_profit_threshold
+        self.min_profit_threshold = min_profit_threshold  # For trade execution
+        self.min_display_threshold = min_display_threshold  # For dashboard display
         
         # Price storage
         self.current_prices: Dict[str, Dict[str, PriceData]] = defaultdict(dict)
@@ -242,7 +245,8 @@ class PriceMonitor:
                             # Cross-exchange arbitrage (original logic)
                             gross_profit_percent = ((best_sell_price - best_buy_price) / best_buy_price) * 100
                         
-                        if gross_profit_percent >= self.min_profit_threshold:
+                        # Show all opportunities above display threshold in dashboard
+                        if gross_profit_percent >= self.min_display_threshold:
                             opportunity = ArbitrageOpportunity(
                                 symbol=symbol,
                                 buy_exchange=best_buy_exchange,
@@ -255,19 +259,21 @@ class PriceMonitor:
                                 sell_order_book=best_sell_data.order_book if best_sell_data else None
                             )
                             
-                            # Add to opportunities list
+                            # Add to opportunities list (for dashboard display)
                             self.opportunities.append(opportunity)
                             
                             # Limit opportunities list size
                             if len(self.opportunities) > 1000:
                                 self.opportunities = self.opportunities[-500:]
                             
-                            # Notify callbacks
-                            for callback in self.opportunity_callbacks:
-                                try:
-                                    await callback(opportunity)
-                                except Exception as e:
-                                    logger.error(f"Error in opportunity callback: {e}")
+                            # Notify callbacks only for opportunities above execution threshold
+                            # (This triggers trade execution analysis)
+                            if gross_profit_percent >= self.min_profit_threshold:
+                                for callback in self.opportunity_callbacks:
+                                    try:
+                                        await callback(opportunity)
+                                    except Exception as e:
+                                        logger.error(f"Error in opportunity callback: {e}")
                 
                 await asyncio.sleep(self.update_interval)
             
