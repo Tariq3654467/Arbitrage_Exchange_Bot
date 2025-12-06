@@ -7,7 +7,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depe
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from typing import List, Dict, Optional
 import asyncio
 import json
@@ -20,6 +19,10 @@ from .models import (
     BotStatus, ExchangeConfig, DEXConfig, TradingConfig, RiskConfig,
     TradeHistory, OpportunityData, PortfolioData, StartBotRequest
 )
+from .routes import exchanges as exchanges_router
+from .routes import advanced as advanced_router
+from .dependencies import verify_credentials
+from . import dependencies as deps
 
 logger = get_logger()
 
@@ -39,39 +42,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Basic authentication
-security = HTTPBasic()
+# Include routers
+app.include_router(exchanges_router.router)
+app.include_router(advanced_router.router)
 
 # Global bot instance
 bot: Optional[ArbitrageBot] = None
 bot_task: Optional[asyncio.Task] = None
 
-# Database instances
-postgres_db = None
-
 # WebSocket connections for real-time updates
 websocket_connections: List[WebSocket] = []
-
-
-def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify basic authentication"""
-    # TODO: Load from config or environment
-    correct_username = "admin"
-    correct_password = "admin"  # Change this!
-    
-    if credentials.username != correct_username or credentials.password != correct_password:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
 
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize bot on startup"""
-    global bot, postgres_db
+    global bot
+    
     logger.info("Starting Web Dashboard API...")
     
     # Initialize database connection
@@ -80,8 +67,10 @@ async def startup_event():
         from ..config.settings import get_settings
         
         settings = get_settings()
-        postgres_db = PostgresManager(settings.postgres_url)
-        postgres_db.connect()
+        db_instance = PostgresManager(settings.postgres_url)
+        db_instance.connect()
+        # Set the global postgres_db in dependencies module
+        deps.postgres_db = db_instance
         logger.info("Database connected successfully")
     except Exception as e:
         logger.warning(f"Database not available: {e}")
@@ -93,13 +82,15 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    global bot, bot_task, postgres_db
+    global bot, bot_task
+    import src.api.dependencies as deps
+    
     if bot and bot.is_running:
         await bot.stop()
     if bot_task:
         bot_task.cancel()
-    if postgres_db:
-        postgres_db.disconnect()
+    if deps.postgres_db:
+        deps.postgres_db.disconnect()
     logger.info("Web Dashboard API stopped")
 
 
@@ -157,13 +148,6 @@ async def start_bot(
                 if ex.exchange_name == 'binance':
                     settings.binance_api_key = ex.api_key
                     settings.binance_api_secret = ex.api_secret
-                elif ex.exchange_name == 'okx':
-                    settings.okx_api_key = ex.api_key
-                    settings.okx_api_secret = ex.api_secret
-                    settings.okx_passphrase = ex.passphrase or ''
-                elif ex.exchange_name == 'bybit':
-                    settings.bybit_api_key = ex.api_key
-                    settings.bybit_api_secret = ex.api_secret
 
                 # Also flip enabled flag in YAML-based config so get_cex_exchanges() returns it
                 if settings.exchanges and 'cex' in settings.exchanges:
@@ -187,36 +171,27 @@ async def start_bot(
                         )
         else:
             # Backwards-compatible: load from database
-            if not postgres_db:
+            if not deps.postgres_db:
                 return {"status": "error", "message": "Database not available. Cannot load API keys."}
 
             from ..database.api_keys_manager import APIKeysManager
 
-            keys_manager = APIKeysManager(postgres_db)
+            keys_manager = APIKeysManager(deps.postgres_db)
 
-            for exchange_name in ['binance', 'okx', 'bybit', 'mexc']:
+            for exchange_name in ['binance', 'mexc']:
                 keys = keys_manager.get_exchange_keys(exchange_name)
                 if keys and keys['enabled']:
                     if exchange_name == 'binance':
                         settings.binance_api_key = keys.get('api_key', '')
                         settings.binance_api_secret = keys.get('api_secret', '')
                         settings.binance_testnet = keys.get('testnet', False)
-                    elif exchange_name == 'okx':
-                        settings.okx_api_key = keys.get('api_key', '')
-                        settings.okx_api_secret = keys.get('api_secret', '')
-                        settings.okx_passphrase = keys.get('passphrase', '')
-                        settings.okx_testnet = keys.get('testnet', False)
-                    elif exchange_name == 'bybit':
-                        settings.bybit_api_key = keys.get('api_key', '')
-                        settings.bybit_api_secret = keys.get('api_secret', '')
-                        settings.bybit_testnet = keys.get('testnet', False)
                     elif exchange_name == 'mexc':
                         settings.mexc_api_key = keys.get('api_key', '')
                         settings.mexc_api_secret = keys.get('api_secret', '')
                         settings.mexc_testnet = keys.get('testnet', False)
             
             # Load DEX configuration from database
-            dex_exchanges = ['pancakeswap', 'uniswap_v2', 'quickswap', 'galaswap']
+            dex_exchanges = ['galaswap']
             for dex_name in dex_exchanges:
                 keys = keys_manager.get_exchange_keys(dex_name)
                 if keys and keys.get('enabled') and keys.get('private_key'):
@@ -228,23 +203,11 @@ async def start_bot(
                     factory_address = keys.get('factory_address', '')
                     
                     # Set private keys and RPC URLs in settings
-                    if chain == 'bsc' or dex_name == 'pancakeswap':
-                        settings.bsc_private_key = private_key
-                        if rpc_url:
-                            settings.bsc_rpc_url = rpc_url
-                    elif chain == 'ethereum' or dex_name == 'uniswap_v2':
-                        settings.eth_private_key = private_key
-                        if rpc_url:
-                            settings.eth_rpc_url = rpc_url
-                    elif chain == 'polygon' or dex_name == 'quickswap':
-                        settings.polygon_private_key = private_key
-                        if rpc_url:
-                            settings.polygon_rpc_url = rpc_url
-                    elif chain == 'gala' or dex_name == 'galaswap':
+                    if chain == 'gala' or dex_name == 'galaswap':
                         settings.gala_private_key = private_key
                         settings.gala_wallet_address = wallet_address or ''
                         if rpc_url:
-                            setattr(settings, 'gala_rpc_url', rpc_url)
+                            settings.gala_rpc_url = rpc_url
                     
                     # Update DEX config in settings to include router/factory addresses
                     if settings.exchanges and 'dex' in settings.exchanges:
@@ -351,19 +314,14 @@ async def get_exchanges_config():
         # Available exchanges list
         available_cex = [
             {"name": "binance", "display_name": "Binance", "supports_testnet": True},
-            {"name": "okx", "display_name": "OKX", "supports_testnet": True, "requires_passphrase": True},
-            {"name": "bybit", "display_name": "Bybit", "supports_testnet": True},
             {"name": "mexc", "display_name": "MEXC", "supports_testnet": False}
         ]
         
         available_dex = [
-            {"name": "pancakeswap", "display_name": "PancakeSwap", "chain": "BSC"},
-            {"name": "uniswap_v2", "display_name": "Uniswap V2", "chain": "Ethereum"},
-            {"name": "quickswap", "display_name": "QuickSwap", "chain": "Polygon"},
             {"name": "galaswap", "display_name": "Galaswap", "chain": "Gala Chain"}
         ]
         
-        if not postgres_db:
+        if not deps.postgres_db:
             return {
                 "available_cex": available_cex,
                 "available_dex": available_dex,
@@ -372,7 +330,7 @@ async def get_exchanges_config():
         
         # Get configured exchanges from database
         from ..database.api_keys_manager import APIKeysManager
-        keys_manager = APIKeysManager(postgres_db)
+        keys_manager = APIKeysManager(deps.postgres_db)
         
         configured = keys_manager.get_all_exchanges()
         
@@ -413,14 +371,14 @@ async def update_exchange_config(
     """Update exchange API credentials - saves to database"""
     try:
         # Initialize database if needed
-        if not postgres_db:
+        if not deps.postgres_db:
             raise HTTPException(status_code=500, detail="Database not initialized")
         
         # Import API keys manager
         from ..database.api_keys_manager import APIKeysManager
         
         # Initialize keys manager
-        keys_manager = APIKeysManager(postgres_db)
+        keys_manager = APIKeysManager(deps.postgres_db)
         
         # Save keys to database
         success = keys_manager.save_exchange_keys(
@@ -454,26 +412,20 @@ async def update_dex_config(
     """Update DEX exchange configuration"""
     try:
         # Initialize database if needed
-        if not postgres_db:
+        if not deps.postgres_db:
             raise HTTPException(status_code=500, detail="Database not initialized")
         
         # Import API keys manager
         from ..database.api_keys_manager import APIKeysManager
         
         # Initialize keys manager
-        keys_manager = APIKeysManager(postgres_db)
+        keys_manager = APIKeysManager(deps.postgres_db)
         
         # Determine chain if not provided
         chain = config.chain
         if not chain:
             # Auto-detect chain based on exchange name
-            if config.exchange_name == 'pancakeswap':
-                chain = 'bsc'
-            elif config.exchange_name in ['uniswap_v2', 'uniswap_v3']:
-                chain = 'ethereum'
-            elif config.exchange_name == 'quickswap':
-                chain = 'polygon'
-            elif config.exchange_name == 'galaswap':
+            if config.exchange_name == 'galaswap':
                 chain = 'gala'
         
         # Get default RPC URLs if not provided
@@ -481,14 +433,8 @@ async def update_dex_config(
         if not rpc_url:
             from ..config.settings import get_settings
             settings = get_settings()
-            if chain == 'bsc':
-                rpc_url = settings.bsc_rpc_url or "https://bsc-dataseed1.binance.org/"
-            elif chain == 'ethereum':
-                rpc_url = settings.eth_rpc_url or ""
-            elif chain == 'polygon':
-                rpc_url = settings.polygon_rpc_url or "https://polygon-rpc.com/"
-            elif chain == 'gala':
-                rpc_url = getattr(settings, 'gala_rpc_url', '') or "https://jsonrpc.gala.games"
+            if chain == 'gala':
+                rpc_url = settings.gala_rpc_url or "https://jsonrpc.gala.games"
         
         # Get default router/factory addresses if not provided
         router_address = config.router_address
@@ -496,20 +442,7 @@ async def update_dex_config(
         
         if not router_address or not factory_address:
             # Use defaults from config.yaml
-            defaults = {
-                'pancakeswap': {
-                    'router': '0x10ED43C718714eb63d5aA57B78B54704E256024E',
-                    'factory': '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73'
-                },
-                'uniswap_v2': {
-                    'router': '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
-                    'factory': '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'
-                },
-                'quickswap': {
-                    'router': '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
-                    'factory': '0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32'
-                }
-            }
+            defaults = {}
             if config.exchange_name in defaults:
                 router_address = router_address or defaults[config.exchange_name]['router']
                 factory_address = factory_address or defaults[config.exchange_name]['factory']
@@ -676,19 +609,142 @@ async def get_current_prices(all_pairs: bool = False):
     
     if all_pairs:
         # Fetch prices for all available pairs from each exchange
-        for exchange_name, exchange in bot.exchanges.items():
+        # Use batch fetching (fetch_tickers) for much better performance
+        # Create a snapshot to avoid RuntimeError if dictionary changes during iteration
+        exchanges_snapshot = list(bot.exchanges.items())
+        for exchange_name, exchange in exchanges_snapshot:
             try:
                 # For CEX exchanges using CCXT
                 if hasattr(exchange, 'exchange') and hasattr(exchange.exchange, 'load_markets'):
                     markets = await exchange.exchange.load_markets()
-                    # Get all active spot markets
+                    
+                    # Try to fetch all tickers at once (much faster than individual calls)
+                    try:
+                        all_tickers = await exchange.exchange.fetch_tickers()
+                    except Exception as e:
+                        logger.warning(f"Batch ticker fetch failed for {exchange_name}, falling back to individual: {e}")
+                        all_tickers = {}
+                    
+                    # Filter to active spot markets and process
+                    processed_count = 0
+                    max_pairs_per_exchange = 1000  # Limit to avoid overwhelming response
+                    
                     for symbol, market in markets.items():
-                        if market.get('active') and market.get('type') == 'spot':
+                        if processed_count >= max_pairs_per_exchange:
+                            break
+                            
+                        if not (market.get('active') and market.get('type') == 'spot'):
+                            continue
+                        
+                        # Get ticker from batch fetch or fetch individually
+                        ticker = all_tickers.get(symbol)
+                        if not ticker:
+                            # Fallback: fetch individual ticker if not in batch
                             try:
                                 ticker = await exchange.get_ticker(symbol)
+                            except Exception:
+                                continue
+                        
+                        if ticker and ticker.get('bid') and ticker.get('ask'):
+                            if symbol not in prices:
+                                prices[symbol] = {}
+                            prices[symbol][exchange_name] = {
+                                "bid": ticker.get('bid'),
+                                "ask": ticker.get('ask'),
+                                "mid": (ticker.get('bid') + ticker.get('ask')) / 2,
+                                "spread": ticker.get('ask') - ticker.get('bid'),
+                                "timestamp": ticker.get('timestamp', datetime.now()).isoformat() if hasattr(ticker.get('timestamp'), 'isoformat') else datetime.now().isoformat()
+                            }
+                            processed_count += 1
+                            
+                # For DEX exchanges (like Galaswap), try to get available pairs
+                elif exchange_name == 'galaswap':
+                    # Galaswap uses a different API structure
+                    # Try to get prices for configured trading pairs
+                    try:
+                        # Get trading pairs from price monitor if available
+                        if bot.price_monitor:
+                            for symbol in bot.price_monitor.trading_pairs:
+                                try:
+                                    ticker = await exchange.get_ticker(symbol)
+                                    if ticker and ticker.get('bid') and ticker.get('ask'):
+                                        if symbol not in prices:
+                                            prices[symbol] = {}
+                                        prices[symbol][exchange_name] = {
+                                            "bid": ticker.get('bid'),
+                                            "ask": ticker.get('ask'),
+                                            "mid": (ticker.get('bid') + ticker.get('ask')) / 2,
+                                            "spread": ticker.get('ask') - ticker.get('bid'),
+                                            "timestamp": ticker.get('timestamp', datetime.now()).isoformat() if hasattr(ticker.get('timestamp'), 'isoformat') else datetime.now().isoformat()
+                                        }
+                                except Exception as e:
+                                    logger.debug(f"Could not fetch {symbol} from {exchange_name}: {e}")
+                                    continue
+                    except Exception as e:
+                        logger.debug(f"Error fetching Galaswap market data: {e}")
+            except Exception as e:
+                logger.error(f"Error fetching markets from {exchange_name}: {e}")
+                continue
+    else:
+        # Original behavior: only configured trading pairs
+        # First try to get from price monitor (fast, cached)
+        if bot.price_monitor:
+            for symbol in bot.price_monitor.trading_pairs:
+                symbol_prices = bot.price_monitor.get_all_prices(symbol)
+                if symbol_prices:  # Only add if we have data
+                    prices[symbol] = {
+                        exchange: {
+                            "bid": data.bid,
+                            "ask": data.ask,
+                            "mid": data.mid,
+                            "spread": data.spread,
+                            "timestamp": data.timestamp.isoformat()
+                        }
+                        for exchange, data in symbol_prices.items()
+                    }
+        
+        # Fallback: If price monitor has no data or missing exchanges, fetch directly from exchanges
+        # This ensures data is shown even if price monitor hasn't started yet or is missing data
+        if bot.exchanges:
+            # Get trading pairs from config or price monitor
+            trading_pairs = []
+            if bot.price_monitor:
+                trading_pairs = bot.price_monitor.trading_pairs
+            else:
+                # Fallback to config
+                from ..config.settings import get_settings
+                settings = get_settings()
+                trading_pairs = [pair.symbol for pair in settings.get_enabled_trading_pairs()]
+            
+            # Fetch prices directly from exchanges for missing data
+            exchanges_snapshot = list(bot.exchanges.items())
+            for symbol in trading_pairs:
+                if symbol not in prices:
+                    prices[symbol] = {}
+                
+                # Check if we need to fetch for any exchange
+                need_fallback = False
+                if not prices[symbol]:  # No data at all for this symbol
+                    need_fallback = True
+                else:
+                    # Check if we're missing data for any connected exchange
+                    for exchange_name, exchange in exchanges_snapshot:
+                        if exchange.is_connected and exchange_name not in prices[symbol]:
+                            need_fallback = True
+                            break
+                
+                if need_fallback:
+                    for exchange_name, exchange in exchanges_snapshot:
+                        if not exchange.is_connected:
+                            continue
+                        if exchange_name in prices[symbol] and prices[symbol][exchange_name]:
+                            continue  # Already have data from price monitor
+                        
+                        try:
+                            # Try to get ticker data
+                            if hasattr(exchange, 'get_ticker'):
+                                ticker = await exchange.get_ticker(symbol)
                                 if ticker and ticker.get('bid') and ticker.get('ask'):
-                                    if symbol not in prices:
-                                        prices[symbol] = {}
                                     prices[symbol][exchange_name] = {
                                         "bid": ticker.get('bid'),
                                         "ask": ticker.get('ask'),
@@ -696,28 +752,12 @@ async def get_current_prices(all_pairs: bool = False):
                                         "spread": ticker.get('ask') - ticker.get('bid'),
                                         "timestamp": ticker.get('timestamp', datetime.now()).isoformat() if hasattr(ticker.get('timestamp'), 'isoformat') else datetime.now().isoformat()
                                     }
-                            except Exception as e:
-                                logger.debug(f"Error fetching ticker for {symbol} on {exchange_name}: {e}")
-                                continue
-                # For DEX exchanges, we can't easily get all pairs, so skip for now
-            except Exception as e:
-                logger.error(f"Error fetching markets from {exchange_name}: {e}")
-                continue
-    else:
-        # Original behavior: only configured trading pairs
-        if bot.price_monitor:
-            for symbol in bot.price_monitor.trading_pairs:
-                symbol_prices = bot.price_monitor.get_all_prices(symbol)
-                prices[symbol] = {
-                    exchange: {
-                        "bid": data.bid,
-                        "ask": data.ask,
-                        "mid": data.mid,
-                        "spread": data.spread,
-                        "timestamp": data.timestamp.isoformat()
-                    }
-                    for exchange, data in symbol_prices.items()
-                }
+                        except Exception as e:
+                            error_msg = str(e)
+                            # Don't log errors for invalid pairs - they're expected
+                            if 'does not have market symbol' not in error_msg and 'Invalid symbol' not in error_msg:
+                                logger.debug(f"Could not fetch {symbol} from {exchange_name} (fallback): {e}")
+                            continue
     
     return prices
 
@@ -732,7 +772,9 @@ async def get_available_pairs():
     
     all_pairs = set()
     
-    for exchange_name, exchange in bot.exchanges.items():
+    # Create a snapshot to avoid RuntimeError if dictionary changes during iteration
+    exchanges_snapshot = list(bot.exchanges.items())
+    for exchange_name, exchange in exchanges_snapshot:
         try:
             # For CEX exchanges using CCXT
             if hasattr(exchange, 'exchange') and hasattr(exchange.exchange, 'load_markets'):
@@ -852,6 +894,15 @@ async def get_balances():
     try:
         balances = await bot.portfolio_manager.update_balances()
         
+        # Log if Galaswap is connected but has no balances
+        if bot.exchanges.get('galaswap') and bot.exchanges['galaswap'].is_connected:
+            galaswap_has_balance = any(
+                'galaswap' in bal.balances_by_exchange 
+                for bal in balances.values()
+            )
+            if not galaswap_has_balance:
+                logger.debug("Galaswap is connected but no balances found. This may be normal if wallet is empty.")
+        
         return {
             "balances": {
                 asset: {
@@ -863,7 +914,7 @@ async def get_balances():
             }
         }
     except Exception as e:
-        logger.error(f"Error getting balances: {e}")
+        logger.error(f"Error getting balances: {e}", exc_info=True)
         return {"error": str(e)}
 
 
@@ -1013,41 +1064,84 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates"""
     await websocket.accept()
     websocket_connections.append(websocket)
+    logger.debug(f"WebSocket client connected. Total connections: {len(websocket_connections)}")
     
     try:
         while True:
-            # Send periodic updates
-            if bot and bot.is_running:
-                # Send status update
-                status = bot.get_status()
-                await websocket.send_json({
-                    "type": "status_update",
-                    "data": status,
-                    "timestamp": datetime.now().isoformat()
-                })
+            try:
+                # Send periodic updates
+                if bot and bot.is_running:
+                    # Send status update
+                    try:
+                        status = bot.get_status()
+                        await websocket.send_json({
+                            "type": "status_update",
+                            "data": status,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    except Exception as status_error:
+                        # Bot status might fail if bot is initializing
+                        logger.debug(f"Could not get bot status: {status_error}")
+                        await websocket.send_json({
+                            "type": "status_update",
+                            "data": {"is_running": False},
+                            "timestamp": datetime.now().isoformat()
+                        })
+                else:
+                    # Bot not running - send empty status
+                    await websocket.send_json({
+                        "type": "status_update",
+                        "data": {"is_running": False},
+                        "timestamp": datetime.now().isoformat()
+                    })
+            except Exception as send_error:
+                # Connection might be closed
+                error_type = type(send_error).__name__
+                error_msg = str(send_error)
+                # Check if it's a connection error (expected when client disconnects)
+                if 'connection' in error_msg.lower() or 'closed' in error_msg.lower() or 'disconnect' in error_type:
+                    logger.debug(f"WebSocket client disconnected: {error_msg}")
+                    break
+                else:
+                    logger.debug(f"WebSocket send error: {error_type}: {error_msg}")
+                    # Try to continue, but if it keeps failing, break
+                    await asyncio.sleep(1)
             
             await asyncio.sleep(2)  # Update every 2 seconds
     
     except WebSocketDisconnect:
-        websocket_connections.remove(websocket)
+        logger.debug("WebSocket client disconnected normally")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        error_type = type(e).__name__
+        error_msg = str(e) if str(e) else f"{error_type}"
+        # Only log unexpected errors, not normal disconnections
+        if 'disconnect' not in error_type.lower() and 'connection' not in error_msg.lower():
+            logger.debug(f"WebSocket error: {error_type}: {error_msg}")
+    finally:
+        # Clean up connection
         if websocket in websocket_connections:
             websocket_connections.remove(websocket)
+            logger.debug(f"WebSocket client removed. Remaining connections: {len(websocket_connections)}")
 
 
 async def broadcast_message(message: dict):
     """Broadcast message to all connected WebSocket clients"""
     disconnected = []
-    for connection in websocket_connections:
+    # Create a copy to avoid modification during iteration
+    connections_copy = list(websocket_connections)
+    
+    for connection in connections_copy:
         try:
             await connection.send_json(message)
-        except:
+        except (WebSocketDisconnect, Exception) as e:
+            # Client disconnected or error sending - remove it
             disconnected.append(connection)
+            logger.debug(f"WebSocket broadcast failed for client: {type(e).__name__}")
     
     # Remove disconnected clients
     for conn in disconnected:
-        websocket_connections.remove(conn)
+        if conn in websocket_connections:
+            websocket_connections.remove(conn)
 
 
 # ==================== Health Check ====================

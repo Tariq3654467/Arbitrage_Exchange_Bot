@@ -104,7 +104,12 @@ class PortfolioManager:
                             all_balances[asset]['prices_usd'][exchange_name] = price_usd
                 
                 except Exception as e:
-                    logger.error(f"Error fetching balance from {exchange_name}: {e}")
+                    error_msg = (
+                        f"Error fetching balance from {exchange_name}. "
+                        f"Error type: {type(e).__name__}, Message: {str(e)}"
+                    )
+                    logger.error(error_msg)
+                    # Continue with other exchanges even if one fails
             
             # Convert to AssetBalance objects
             self.current_balances = {}

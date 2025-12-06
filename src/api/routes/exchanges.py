@@ -3,9 +3,9 @@ Exchange Management Routes
 Additional routes for managing exchanges
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from typing import List
-from ...api.main import verify_credentials, postgres_db
+from ...api.dependencies import verify_credentials, postgres_db
 from ...utils.logger import get_logger
 
 logger = get_logger()
@@ -14,8 +14,8 @@ router = APIRouter()
 
 @router.post("/api/exchanges/toggle")
 async def toggle_exchange(
-    exchange_name: str,
-    enabled: bool,
+    exchange_name: str = Body(...),
+    enabled: bool = Body(...),
     username: str = Depends(verify_credentials)
 ):
     """Enable or disable an exchange"""

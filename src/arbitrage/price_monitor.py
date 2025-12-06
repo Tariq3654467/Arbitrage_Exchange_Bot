@@ -63,7 +63,8 @@ class PriceMonitor:
         trading_pairs: List[str],
         update_interval: float = 0.1,  # 100ms
         min_profit_threshold: float = 0.5,
-        min_display_threshold: float = 0.01  # Show all opportunities >= 0.01% in dashboard
+        min_display_threshold: float = 0.01,  # Show all opportunities >= 0.01% in dashboard
+        symbol_exchange_map: Optional[Dict[str, List[str]]] = None  # Map of symbol -> list of exchanges that support it
     ):
         """
         Initialize price monitor
@@ -74,12 +75,14 @@ class PriceMonitor:
             update_interval: Price update interval in seconds
             min_profit_threshold: Minimum profit % to execute trades (for callbacks)
             min_display_threshold: Minimum profit % to show in dashboard (lower threshold)
+            symbol_exchange_map: Optional map of symbol -> list of exchanges that support it
         """
         self.exchanges = exchanges
         self.trading_pairs = trading_pairs
         self.update_interval = update_interval
         self.min_profit_threshold = min_profit_threshold  # For trade execution
         self.min_display_threshold = min_display_threshold  # For dashboard display
+        self.symbol_exchange_map = symbol_exchange_map or {}  # Track which exchanges support which pairs
         
         # Price storage
         self.current_prices: Dict[str, Dict[str, PriceData]] = defaultdict(dict)
@@ -92,6 +95,13 @@ class PriceMonitor:
         # Monitoring state
         self.is_running = False
         self.monitor_tasks = []
+        
+        # Rate limiting: semaphore to limit concurrent requests per exchange
+        # Binance allows ~20 requests/second, so limit to 10 concurrent per exchange
+        self.exchange_semaphores = {
+            exchange_name: asyncio.Semaphore(10) 
+            for exchange_name in exchanges.keys()
+        }
         
         logger.info(f"Price monitor initialized for {len(trading_pairs)} pairs across {len(exchanges)} exchanges")
     
@@ -109,12 +119,40 @@ class PriceMonitor:
         logger.info("Starting price monitor...")
         
         # Start monitoring tasks for each exchange-pair combination
+        # Only monitor pairs on exchanges that support them
+        # Stagger startup to avoid rate limits (delay between each task creation)
+        task_count = 0
         for exchange_name, exchange in self.exchanges.items():
             for symbol in self.trading_pairs:
+                # Check if this exchange supports this symbol
+                # If symbol_exchange_map is provided, only monitor on listed exchanges
+                if self.symbol_exchange_map:
+                    supported_exchanges = self.symbol_exchange_map.get(symbol, [])
+                    # If symbol is in map but exchange not listed, skip
+                    if symbol in self.symbol_exchange_map and exchange_name not in supported_exchanges:
+                        continue
+                    # If symbol not in map, monitor on all exchanges (backward compatibility)
+                
+                # Filter Galaswap-specific tokens (GALA, GUSDT, GUSDC, GWETH) to only Galaswap
+                if symbol.startswith(('GALA/', 'GUSDT/', 'GUSDC/', 'GWETH/', 'USDT/GALA', 'USDC/GALA', 'BTC/GALA', 'ETH/GALA', 'FDUSD/GALA', 'BUSD/GALA',
+                                     'USDT/GUSDT', 'USDC/GUSDT', 'BTC/GUSDT', 'ETH/GUSDT', 'FDUSD/GUSDT', 'BUSD/GUSDT',
+                                     'USDT/GUSDC', 'USDC/GUSDC', 'BTC/GUSDC', 'ETH/GUSDC', 'FDUSD/GUSDC', 'BUSD/GUSDC',
+                                     'USDT/GWETH', 'USDC/GWETH', 'BTC/GWETH', 'ETH/GWETH', 'FDUSD/GWETH', 'BUSD/GWETH')) or \
+                   symbol.endswith(('/GALA', '/GUSDT', '/GUSDC', '/GWETH')) or \
+                   '/UNKNOWN' in symbol:
+                    if exchange_name != 'galaswap':
+                        continue  # Skip Galaswap tokens on other exchanges
+                
                 task = asyncio.create_task(
                     self._monitor_price(exchange_name, exchange, symbol)
                 )
                 self.monitor_tasks.append(task)
+                task_count += 1
+                
+                # Stagger task creation to avoid overwhelming API on startup
+                # Add small delay every 10 tasks to prevent rate limits
+                if task_count % 10 == 0:
+                    await asyncio.sleep(0.1)  # 100ms delay every 10 tasks
         
         # Start opportunity detection task
         detect_task = asyncio.create_task(self._detect_opportunities())
@@ -147,10 +185,15 @@ class PriceMonitor:
         symbol: str
     ):
         """Monitor price for a specific exchange and symbol"""
+        # Get semaphore for this exchange to limit concurrent requests
+        semaphore = self.exchange_semaphores.get(exchange_name, asyncio.Semaphore(10))
+        
         while self.is_running:
             try:
-                # Fetch order book
-                order_book = await exchange.get_order_book(symbol, depth=10)
+                # Use semaphore to limit concurrent API requests
+                async with semaphore:
+                    # Fetch order book
+                    order_book = await exchange.get_order_book(symbol, depth=10)
                 
                 # Extract price data
                 if order_book.best_bid and order_book.best_ask:
@@ -181,8 +224,41 @@ class PriceMonitor:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error monitoring price for {exchange_name} {symbol}: {e}")
-                await asyncio.sleep(1)  # Wait before retry
+                # Check if this is a known invalid pair error
+                error_msg = str(e)
+                if 'does not have market symbol' in error_msg or 'Invalid symbol' in error_msg:
+                    # Invalid pair - stop monitoring this symbol on this exchange
+                    logger.debug(f"Invalid pair {symbol} on {exchange_name}, stopping monitoring")
+                    break
+                
+                # Log detailed error information (but reduce frequency)
+                error_type = type(e).__name__
+                
+                # Handle rate limiting with longer backoff
+                if 'rate limit' in error_msg.lower() or 'RateLimitExceeded' in error_type or '429' in error_msg:
+                    logger.warning(
+                        f"Rate limit hit for {exchange_name} {symbol}. "
+                        f"Waiting 10 seconds before retry. Error: {error_msg}"
+                    )
+                    await asyncio.sleep(10)  # Longer wait for rate limits (Binance 429 errors)
+                    # Also increase update interval temporarily to reduce load
+                    await asyncio.sleep(self.update_interval * 2)
+                # Handle timeout errors with exponential backoff
+                elif 'timeout' in error_msg.lower() or 'RequestTimeout' in error_type:
+                    logger.warning(
+                        f"Request timeout for {exchange_name} {symbol}. "
+                        f"This may be due to network issues or API slowness. "
+                        f"Waiting 3 seconds before retry."
+                    )
+                    await asyncio.sleep(3)  # Wait before retrying timeout
+                else:
+                    # Only log unexpected errors, not common network issues
+                    if 'network' not in error_msg.lower() and 'connection' not in error_msg.lower():
+                        logger.debug(
+                            f"Error monitoring price for {exchange_name} {symbol}. "
+                            f"Error type: {error_type}, Message: {error_msg}"
+                        )
+                    await asyncio.sleep(1)  # Normal retry wait
     
     async def _detect_opportunities(self):
         """Continuously detect arbitrage opportunities"""
@@ -195,8 +271,9 @@ class PriceMonitor:
                     
                     prices = self.current_prices[symbol]
                     
-                    # Need at least 2 exchanges to find arbitrage
-                    if len(prices) < 2:
+                    # Need at least 1 exchange with price data to find arbitrage
+                    # (Same-exchange arbitrage only needs 1 exchange with both bid/ask)
+                    if len(prices) < 1:
                         continue
                     
                     # Find best buy and sell prices

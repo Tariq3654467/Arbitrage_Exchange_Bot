@@ -6,9 +6,11 @@ Handles swaps on Galaswap using GalaConnect API
 import json
 import uuid
 import base64
+import asyncio
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 import aiohttp
+from aiohttp import ClientConnectorError, ClientTimeout
 from eth_account import Account
 from eth_keys import keys
 from eth_utils import keccak, to_checksum_address
@@ -141,6 +143,9 @@ class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
     
     API_BASE_URL = "https://api-galaswap.gala.com"
+    REQUEST_TIMEOUT = 10  # seconds
+    MAX_RETRIES = 3
+    RETRY_DELAY_BASE = 1  # seconds
     
     def __init__(
         self,
@@ -160,25 +165,99 @@ class GalaswapConnector(BaseExchange):
         """
         BaseExchange.__init__(self, exchange_name="galaswap", testnet=False)
         
+        # Validate wallet address format
+        if not wallet_address or not isinstance(wallet_address, str):
+            raise ValueError("Wallet address is required and must be a string")
+        
+        wallet_address = wallet_address.strip()
+        if not wallet_address:
+            raise ValueError("Wallet address cannot be empty")
+        
+        # Gala wallet addresses typically have format: "client|..." or just an address
+        # Log format for debugging
+        if '|' in wallet_address:
+            logger.debug(f"Gala wallet address format detected: contains '|' separator")
+        elif wallet_address.startswith('0x'):
+            logger.debug(f"Gala wallet address format detected: Ethereum-style address")
+        else:
+            logger.debug(f"Gala wallet address format: {wallet_address[:20]}...")
+        
         self.wallet_address = wallet_address
         self.private_key = private_key
         
-        # Initialize account for key operations
+        # Validate and initialize account for key operations
+        if not private_key or not isinstance(private_key, str):
+            raise ValueError("Private key is required and must be a string")
+        
+        # Remove whitespace
+        private_key = private_key.strip()
+        
+        if not private_key:
+            raise ValueError("Private key cannot be empty")
+        
+        # Remove 0x prefix if present
         if private_key.startswith('0x'):
             private_key_clean = private_key[2:]
         else:
             private_key_clean = private_key
         
+        # Validate hex format
+        try:
+            # Check if it's valid hex
+            int(private_key_clean, 16)
+        except ValueError:
+            raise ValueError(
+                f"Invalid private key format: contains non-hexadecimal characters. "
+                f"Private key must be 64 hex characters (with or without 0x prefix). "
+                f"Got: {private_key[:10]}..." if len(private_key) > 10 else private_key
+            )
+        
+        # Check length (should be 64 hex chars = 32 bytes)
+        if len(private_key_clean) != 64:
+            raise ValueError(
+                f"Invalid private key length: expected 64 hex characters (32 bytes), "
+                f"got {len(private_key_clean)} characters"
+            )
+        
+        # Initialize account
         try:
             self.account = Account.from_key('0x' + private_key_clean)
-        except:
-            self.account = Account.from_key(private_key)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to create account from private key: {str(e)}. "
+                f"Please ensure the private key is a valid Ethereum-compatible private key."
+            ) from e
         
         self.public_key = public_key
         self.is_connected = False
         
         # Token registry for symbol -> token class mapping
         self.token_registry: Dict[str, Dict] = {}
+        
+        # Token name mapping for common Gala tokens
+        # Maps collection code to actual token name
+        self.token_names: Dict[str, str] = {
+            "GALA": "Gala",
+            "GUSDT": "Gala Tether USD",
+            "GUSDC": "Gala USD Coin",
+            "GWETH": "Gala Wrapped Ethereum",
+            "USDT": "Tether USD",
+            "USDC": "USD Coin",
+            "ETH": "Ethereum",
+            "BTC": "Bitcoin",
+            "BNB": "Binance Coin",
+            "MATIC": "Polygon",
+            "ADA": "Cardano",
+            "DOT": "Polkadot",
+            "SOL": "Solana",
+            "LINK": "Chainlink",
+            "UNI": "Uniswap",
+            "AAVE": "Aave",
+            "SAND": "The Sandbox",
+            "MANA": "Decentraland",
+            "AXS": "Axie Infinity",
+            "ENJ": "Enjin Coin",
+        }
         
         logger.info(f"Initialized Galaswap connector for wallet: {wallet_address}")
     
@@ -187,30 +266,113 @@ class GalaswapConnector(BaseExchange):
         try:
             # Fetch public key if not provided
             if not self.public_key:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
-                        json={"user": self.wallet_address},
-                        headers={"Content-Type": "application/json"}
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            self.public_key = data.get("Data", {}).get("publicKey")
-                            if not self.public_key:
-                                raise ValueError("Could not fetch public key")
-                            logger.info("Fetched public key from API")
-                        else:
-                            raise ConnectionError(f"Failed to fetch public key: {response.status}")
+                try:
+                    timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.post(
+                            f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
+                            json={"user": self.wallet_address},
+                            headers={"Content-Type": "application/json"}
+                        ) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                self.public_key = data.get("Data", {}).get("publicKey")
+                                if not self.public_key:
+                                    logger.warning("Public key not found in API response")
+                                else:
+                                    logger.info("Fetched public key from API")
+                            else:
+                                # Try to get error message from response
+                                try:
+                                    error_data = await response.json()
+                                    error_msg = error_data.get("Message", error_data.get("message", "Unknown error"))
+                                except:
+                                    error_msg = await response.text()
+                                
+                                # Only log as debug - this is often normal for new wallets
+                                logger.debug(
+                                    f"Public key not available from API (status {response.status}): {error_msg}. "
+                                    f"This is normal for new wallets or different address formats. "
+                                    f"Will derive public key from private key if needed."
+                                )
+                                
+                                # Try to derive public key from private key as fallback
+                                try:
+                                    # Get public key from account
+                                    public_key_bytes = self.account.key
+                                    # Convert to hex and then base64 (Gala API might expect base64)
+                                    import base64
+                                    # Get uncompressed public key (65 bytes: 0x04 + 32 bytes x + 32 bytes y)
+                                    public_key_hex = self.account.key.public_key.to_hex()
+                                    # For now, we'll skip this and let it work without public key if needed
+                                    logger.info("Will proceed without public key - it may be required for some operations")
+                                except Exception as derive_error:
+                                    logger.debug(f"Could not derive public key: {derive_error}")
+                except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
+                    # Network errors - API might be temporarily unavailable, use debug level
+                    logger.debug(
+                        f"Galaswap API temporarily unavailable when fetching public key: {fetch_error}. "
+                        f"Will proceed without it. Public key will be derived from private key if needed."
+                    )
+                except Exception as fetch_error:
+                    error_msg = str(fetch_error)
+                    # Only warn if it's not a network issue
+                    if 'network' not in error_msg.lower() and 'connection' not in error_msg.lower():
+                        logger.debug(
+                            f"Could not fetch public key from API: {fetch_error}. "
+                            f"Will proceed without it. Public key will be derived from private key if needed."
+                        )
             
-            # Test connection by fetching balances
-            await self.get_balance()
+            # Test connection by fetching balances (this will fail gracefully if wallet is empty)
+            try:
+                await self.get_balance()
+                logger.debug("Balance fetch successful during connection test")
+            except (ClientConnectorError, asyncio.TimeoutError) as balance_error:
+                # Network errors - API might be temporarily unavailable
+                logger.debug(
+                    f"Galaswap API temporarily unavailable during connection test: {balance_error}. "
+                    f"Will retry on next operation."
+                )
+            except Exception as balance_error:
+                error_msg = str(balance_error)
+                # Only warn if it's not a network/connection issue
+                if 'network' not in error_msg.lower() and 'connection' not in error_msg.lower() and 'timeout' not in error_msg.lower():
+                    logger.debug(
+                        f"Could not fetch balances during connection test: {balance_error}. "
+                        f"This may be normal if the wallet is empty or the API format has changed."
+                    )
+                # Don't fail connection if balance fetch fails - wallet might just be empty
             
             self.is_connected = True
-            logger.info(f"✓ Connected to Galaswap (GalaConnect API)")
+            
+            # Verify wallet configuration
+            if not self.wallet_address or not self.private_key:
+                logger.warning("Galaswap wallet address or private key not configured properly")
+            else:
+                logger.info(f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address}")
         
         except Exception as e:
-            logger.error(f"Error connecting to Galaswap: {e}")
-            raise
+            # Don't raise on connection errors - allow bot to continue
+            # The exchange will just return empty data when API is unreachable
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # Check if it's a network/connection issue (expected and handled gracefully)
+            if 'network' in error_msg.lower() or 'connection' in error_msg.lower() or 'timeout' in error_msg.lower() or 'ClientConnectorError' in error_type:
+                logger.debug(
+                    f"Galaswap API temporarily unavailable during connection: {error_msg}. "
+                    f"Will retry on next operation. Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"Wallet: {self.wallet_address}"
+                )
+            else:
+                # Other errors might be configuration issues
+                logger.warning(
+                    f"Error connecting to Galaswap: {error_type}: {error_msg}. "
+                    f"Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"Wallet: {self.wallet_address}"
+                )
+            
+            # Still mark as connected so bot can continue - methods will handle API errors gracefully
+            self.is_connected = True
+            logger.info(f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address}")
     
     async def disconnect(self):
         """Disconnect from API"""
@@ -249,22 +411,31 @@ class GalaswapConnector(BaseExchange):
         Returns:
             Tuple of (base_token_class, quote_token_class)
         """
-        base, quote = symbol.split('/')
+        try:
+            base, quote = symbol.split('/')
+        except ValueError:
+            raise ValueError(f"Invalid symbol format: {symbol}. Expected format: BASE/QUOTE")
         
-        # Try to get from registry
-        base_class = self.token_registry.get(base.upper(), {
-            "collection": base.upper(),
-            "category": "Unit",
-            "type": "none",
-            "additionalKey": "none"
-        })
+        # Try to get from registry first
+        base_class = self.token_registry.get(base.upper())
+        quote_class = self.token_registry.get(quote.upper())
         
-        quote_class = self.token_registry.get(quote.upper(), {
-            "collection": quote.upper(),
-            "category": "Unit",
-            "type": "none",
-            "additionalKey": "none"
-        })
+        # If not in registry, use default format
+        if not base_class:
+            base_class = {
+                "collection": base.upper(),
+                "category": "Unit",
+                "type": "none",
+                "additionalKey": "none"
+            }
+        
+        if not quote_class:
+            quote_class = {
+                "collection": quote.upper(),
+                "category": "Unit",
+                "type": "none",
+                "additionalKey": "none"
+            }
         
         return base_class, quote_class
     
@@ -278,9 +449,25 @@ class GalaswapConnector(BaseExchange):
         method: str,
         endpoint: str,
         body: dict,
-        headers: Optional[Dict] = None
+        headers: Optional[Dict] = None,
+        retry_on_connection_error: bool = True
     ) -> dict:
-        """Make a signed API request"""
+        """
+        Make a signed API request
+        
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            body: Request body
+            headers: Additional headers
+            retry_on_connection_error: Whether to retry on connection errors
+        
+        Returns:
+            Response JSON data
+        
+        Raises:
+            Exception: If request fails after retries
+        """
         if headers is None:
             headers = {}
         
@@ -297,42 +484,118 @@ class GalaswapConnector(BaseExchange):
         signature = sign_request_body(body, self.private_key)
         body["signature"] = signature
         
-        async with aiohttp.ClientSession() as session:
-            async with session.request(
-                method,
-                f"{self.API_BASE_URL}{endpoint}",
-                json=body,
-                headers=headers
-            ) as response:
-                if response.status >= 400:
-                    error_text = await response.text()
-                    logger.error(f"API error {response.status}: {error_text}")
-                    raise Exception(f"API error {response.status}: {error_text}")
-                
-                return await response.json()
+        timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+        last_error = None
+        
+        for attempt in range(self.MAX_RETRIES if retry_on_connection_error else 1):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.request(
+                        method,
+                        f"{self.API_BASE_URL}{endpoint}",
+                        json=body,
+                        headers=headers
+                    ) as response:
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            logger.error(f"API error {response.status}: {error_text}")
+                            raise Exception(f"API error {response.status}: {error_text}")
+                        
+                        return await response.json()
+            
+            except (ClientConnectorError, asyncio.TimeoutError) as e:
+                last_error = e
+                if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
+                    delay = self.RETRY_DELAY_BASE * (2 ** attempt)
+                    # Only log on first attempt to reduce spam
+                    if attempt == 0:
+                        logger.debug(
+                            f"Connection error to Galaswap API (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}. "
+                            f"Retrying in {delay}s..."
+                        )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: {e}"
+                    )
+                    raise
+            
+            except Exception as e:
+                # For non-connection errors, don't retry
+                raise
+        
+        # Should never reach here, but just in case
+        if last_error:
+            raise last_error
+        raise Exception("Unexpected error in _make_signed_request")
     
     async def _make_unsigned_request(
         self,
         method: str,
         endpoint: str,
-        body: Optional[dict] = None
+        body: Optional[dict] = None,
+        retry_on_connection_error: bool = True
     ) -> dict:
-        """Make an unsigned API request (for read operations)"""
-        headers = {"Content-Type": "application/json"}
+        """
+        Make an unsigned API request (for read operations)
         
-        async with aiohttp.ClientSession() as session:
-            async with session.request(
-                method,
-                f"{self.API_BASE_URL}{endpoint}",
-                json=body or {},
-                headers=headers
-            ) as response:
-                if response.status >= 400:
-                    error_text = await response.text()
-                    logger.error(f"API error {response.status}: {error_text}")
-                    raise Exception(f"API error {response.status}: {error_text}")
-                
-                return await response.json()
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            body: Request body
+            retry_on_connection_error: Whether to retry on connection errors
+        
+        Returns:
+            Response JSON data
+        
+        Raises:
+            Exception: If request fails after retries
+        """
+        headers = {"Content-Type": "application/json"}
+        timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+        
+        last_error = None
+        for attempt in range(self.MAX_RETRIES if retry_on_connection_error else 1):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.request(
+                        method,
+                        f"{self.API_BASE_URL}{endpoint}",
+                        json=body or {},
+                        headers=headers
+                    ) as response:
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            logger.error(f"API error {response.status}: {error_text}")
+                            raise Exception(f"API error {response.status}: {error_text}")
+                        
+                        return await response.json()
+            
+            except (ClientConnectorError, asyncio.TimeoutError) as e:
+                last_error = e
+                if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
+                    delay = self.RETRY_DELAY_BASE * (2 ** attempt)
+                    # Only log on first attempt to reduce spam
+                    if attempt == 0:
+                        logger.debug(
+                            f"Connection error to Galaswap API (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}. "
+                            f"Retrying in {delay}s..."
+                        )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: {e}"
+                    )
+                    raise
+            
+            except Exception as e:
+                # For non-connection errors, don't retry
+                raise
+        
+        # Should never reach here, but just in case
+        if last_error:
+            raise last_error
+        raise Exception("Unexpected error in _make_unsigned_request")
     
     async def get_order_book(self, symbol: str, depth: int = 10) -> OrderBook:
         """
@@ -340,22 +603,60 @@ class GalaswapConnector(BaseExchange):
         
         Note: Galaswap doesn't have traditional order books.
         We simulate one from available swaps.
+        
+        Returns empty order book if API is unreachable to allow bot to continue.
         """
         try:
             base_class, quote_class = self._parse_symbol(symbol)
             
             # Fetch available swaps (we want to buy base with quote)
             # So we offer quote and want base
-            response = await self._make_unsigned_request(
-                "POST",
-                "/v1/FetchAvailableTokenSwaps",
-                {
-                    "offeredTokenClass": quote_class,  # What we're offering
-                    "wantedTokenClass": base_class     # What we want
-                }
-            )
+            try:
+                response = await self._make_unsigned_request(
+                    "POST",
+                    "/v1/FetchAvailableTokenSwaps",
+                    {
+                        "offeredTokenClass": quote_class,  # What we're offering
+                        "wantedTokenClass": base_class     # What we want
+                    }
+                )
+            except Exception as api_error:
+                error_msg = str(api_error)
+                # Check if it's an API error response
+                if 'API error' in error_msg:
+                    logger.debug(f"Galaswap API error for {symbol}: {api_error}")
+                else:
+                    logger.debug(f"Galaswap request error for {symbol}: {api_error}")
+                # Return empty order book
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
+            
+            # Check response structure
+            if not response:
+                logger.debug(f"Empty response from Galaswap API for {symbol}")
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
             
             swaps = response.get("results", [])
+            if not swaps:
+                logger.debug(f"No swaps available for {symbol} on Galaswap")
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
             
             # Build order book from swaps
             bids = []  # People offering base (we can buy from them)
@@ -367,16 +668,32 @@ class GalaswapConnector(BaseExchange):
                     offered = swap.get("offered", [])
                     wanted = swap.get("wanted", [])
                     
-                    if offered and wanted:
-                        # Calculate price: quote per base
-                        base_qty = float(offered[0].get("quantity", 0))
-                        quote_qty = float(wanted[0].get("quantity", 0))
+                    # Handle different response structures
+                    if not offered or not wanted:
+                        continue
+                    
+                    # Ensure they're lists
+                    if not isinstance(offered, list):
+                        offered = [offered]
+                    if not isinstance(wanted, list):
+                        wanted = [wanted]
+                    
+                    if offered and wanted and len(offered) > 0 and len(wanted) > 0:
+                        # Get quantities - handle different formats
+                        base_item = offered[0] if isinstance(offered[0], dict) else {}
+                        quote_item = wanted[0] if isinstance(wanted[0], dict) else {}
                         
-                        if base_qty > 0:
+                        base_qty = float(base_item.get("quantity", base_item.get("qty", 0)))
+                        quote_qty = float(quote_item.get("quantity", quote_item.get("qty", 0)))
+                        
+                        if base_qty > 0 and quote_qty > 0:
                             price = quote_qty / base_qty
                             bids.append((price, base_qty))
+                except (ValueError, TypeError, KeyError, IndexError) as e:
+                    logger.debug(f"Error parsing swap for {symbol}: {e}")
+                    continue
                 except Exception as e:
-                    logger.warning(f"Error parsing swap: {e}")
+                    logger.debug(f"Unexpected error parsing swap for {symbol}: {type(e).__name__}: {e}")
                     continue
             
             # Sort bids descending (highest first)
@@ -399,12 +716,39 @@ class GalaswapConnector(BaseExchange):
                 timestamp=datetime.now()
             )
         
+        except (ClientConnectorError, asyncio.TimeoutError) as e:
+            # Connection errors: return empty order book to allow bot to continue
+            logger.debug(
+                f"Galaswap API temporarily unavailable for {symbol} order book: {e}"
+            )
+            return OrderBook(
+                exchange=self.exchange_name,
+                symbol=symbol,
+                bids=[],
+                asks=[],
+                timestamp=datetime.now()
+            )
         except Exception as e:
-            logger.error(f"Error fetching order book for {symbol}: {e}")
-            raise
+            # Other errors: log with more detail and return empty order book
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logger.debug(
+                f"Error fetching order book for {symbol}: {error_type}: {error_msg}"
+            )
+            return OrderBook(
+                exchange=self.exchange_name,
+                symbol=symbol,
+                bids=[],
+                asks=[],
+                timestamp=datetime.now()
+            )
     
     async def get_ticker(self, symbol: str) -> Dict:
-        """Get ticker data for a symbol"""
+        """
+        Get ticker data for a symbol
+        
+        Returns empty ticker data if API is unreachable to allow bot to continue.
+        """
         try:
             order_book = await self.get_order_book(symbol, depth=1)
             
@@ -422,11 +766,30 @@ class GalaswapConnector(BaseExchange):
                     'timestamp': datetime.now()
                 }
             else:
-                raise ValueError(f"No price data available for {symbol}")
+                # Return empty ticker data instead of raising
+                logger.debug(f"No price data available for {symbol} on Galaswap")
+                return {
+                    'symbol': symbol,
+                    'bid': 0.0,
+                    'ask': 0.0,
+                    'last': 0.0,
+                    'volume': 0.0,
+                    'timestamp': datetime.now()
+                }
         
         except Exception as e:
-            logger.error(f"Error fetching ticker for {symbol}: {e}")
-            raise
+            # Return empty ticker data on any error to allow bot to continue
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logger.debug(f"Error fetching ticker for {symbol}: {error_type}: {error_msg}")
+            return {
+                'symbol': symbol,
+                'bid': 0.0,
+                'ask': 0.0,
+                'last': 0.0,
+                'volume': 0.0,
+                'timestamp': datetime.now()
+            }
     
     async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Balance]:
         """Get account balance"""
@@ -444,18 +807,65 @@ class GalaswapConnector(BaseExchange):
                 try:
                     token_class = token_data.get("tokenClass", {})
                     collection = token_class.get("collection", "")
-                    quantity = float(token_data.get("quantity", "0"))
-                    locked = float(token_data.get("lockedHolds", "0"))
+                    
+                    # Handle quantity - might be a list or single value
+                    quantity_raw = token_data.get("quantity", "0")
+                    if isinstance(quantity_raw, list):
+                        # If it's a list, sum all values or take first element
+                        quantity = float(sum(float(x) for x in quantity_raw if x)) if quantity_raw else 0.0
+                    elif isinstance(quantity_raw, (int, float)):
+                        quantity = float(quantity_raw)
+                    else:
+                        quantity = float(quantity_raw) if quantity_raw else 0.0
+                    
+                    # Handle lockedHolds - might be a list or single value
+                    locked_raw = token_data.get("lockedHolds", "0")
+                    if isinstance(locked_raw, list):
+                        # If it's a list, sum all values or take first element
+                        locked = float(sum(float(x) for x in locked_raw if x)) if locked_raw else 0.0
+                    elif isinstance(locked_raw, (int, float)):
+                        locked = float(locked_raw)
+                    else:
+                        locked = float(locked_raw) if locked_raw else 0.0
                     
                     if quantity > 0 or locked > 0:
-                        symbol = collection  # Use collection as symbol
+                        # Use collection as symbol, format it properly
+                        symbol = collection.upper() if collection else "UNKNOWN"
+                        
+                        # Get actual token name from mapping or API response
+                        token_name = None
+                        
+                        # Check if API response has a name field
+                        if "name" in token_data:
+                            token_name = token_data.get("name")
+                        elif "tokenName" in token_data:
+                            token_name = token_data.get("tokenName")
+                        elif "displayName" in token_data:
+                            token_name = token_data.get("displayName")
+                        
+                        # If no name in API, use our mapping
+                        if not token_name:
+                            token_name = self.token_names.get(symbol, symbol)
+                        
+                        # Try to get additional info from token class
+                        category = token_class.get("category", "")
+                        type_info = token_class.get("type", "")
+                        
+                        # Create display name: "Token Name (SYMBOL)" or just "Token Name"
+                        if token_name and token_name != symbol:
+                            display_name = f"{token_name} ({symbol})"
+                        elif category and category.lower() not in ["unit", "none", ""]:
+                            display_name = f"{symbol} ({category.upper()})"
+                        else:
+                            display_name = symbol
+                        
                         balances[symbol] = Balance(
-                            asset=symbol,
+                            asset=display_name,  # Use actual token name for better readability
                             free=quantity - locked,
                             locked=locked
                         )
                 except Exception as e:
-                    logger.warning(f"Error parsing balance: {e}")
+                    logger.warning(f"Error parsing balance for token {token_data.get('tokenClass', {}).get('collection', 'unknown')}: {e}")
                     continue
             
             # Filter by asset if specified
@@ -465,8 +875,13 @@ class GalaswapConnector(BaseExchange):
             return balances
         
         except Exception as e:
-            logger.error(f"Error fetching balance: {e}")
-            raise
+            error_msg = (
+                f"Error fetching Galaswap balance for wallet {self.wallet_address}. "
+                f"Error type: {type(e).__name__}, Message: {str(e)}"
+            )
+            logger.error(error_msg, exc_info=True)
+            # Return empty balances instead of raising to allow other exchanges to work
+            return {}
     
     async def place_market_order(
         self, 

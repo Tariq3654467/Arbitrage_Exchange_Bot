@@ -35,6 +35,7 @@ class OKXConnector(BaseExchange):
             'secret': api_secret,
             'password': passphrase,
             'enableRateLimit': enable_rate_limit,
+            'timeout': 30000,  # 30 seconds timeout (in milliseconds)
             'options': {
                 'defaultType': 'spot',
             }

@@ -6,16 +6,19 @@
 bot:
   name: "Arbitrage Cross-Exchange Bot"
   version: "1.0.0"
-  paper_trading: true  # Set to false for live trading
-  testnet_mode: true   # Enable testnet for all exchanges (can be overridden per exchange)
+  paper_trading: false  # LIVE TRADING MODE: Real trading enabled - REAL FUNDS WILL BE USED
+  testnet_mode: false   # PRODUCTION MODE: Using mainnet exchanges - REAL FUNDS WILL BE USED
   
 # ----- TRADING PARAMETERS -----
 trading:
-  min_profit_threshold: 0.5  # Minimum profit % after all fees
+  min_profit_threshold: 0.001  # Minimum profit % after all fees (0.001% = very small gap for frequent testing)
   max_trade_size_percent: 10  # Max % of available capital per trade
   max_slippage_percent: 1.0   # Max slippage for DEX trades
   order_timeout_seconds: 30   # Max time to wait for order execution
   retry_attempts: 3
+  auto_discover_pairs: true   # Automatically discover trading pairs from exchanges
+  max_discovered_pairs: 50   # Maximum number of pairs to auto-discover (prevents rate limits and file descriptor issues)
+  preferred_quote_currencies: [USDT, FDUSD, BTC, ETH, BUSD, USDC]  # Prioritize pairs with these quote currencies
   
 # ----- RISK MANAGEMENT -----
 risk:
@@ -31,22 +34,8 @@ exchanges:
   cex:
     - name: binance
       enabled: true      # Enable in dashboard after adding API keys
-      testnet: false      # Use Binance testnet (set to false for mainnet)
+      testnet: false     # PRODUCTION: Using Binance mainnet - REAL FUNDS
       order_type: market  # market or limit
-      max_latency_ms: 50
-      websocket_enabled: true
-      
-    - name: okx
-      enabled: false      # Enable in dashboard after adding API keys
-      testnet: true       # Use OKX testnet (set to false for mainnet)
-      order_type: market
-      max_latency_ms: 50
-      websocket_enabled: true
-      
-    - name: bybit
-      enabled: false      # Enable in dashboard after adding API keys
-      testnet: true       # Use Bybit testnet (set to false for mainnet)
-      order_type: market
       max_latency_ms: 50
       websocket_enabled: true
       
@@ -60,30 +49,8 @@ exchanges:
 # ----- DEX EXCHANGES -----
 # Disabled by default - enable in dashboard after adding private keys
   dex:
-    - name: pancakeswap
-      enabled: false      # Enable in dashboard after adding BSC private key
-      chain: bsc
-      router_address: "0x10ED43C718714eb63d5aA57B78B54704E256024E"
-      factory_address: "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73"
-      
-    - name: uniswap_v2
-      enabled: false      # Enable in dashboard after adding ETH private key
-      chain: ethereum
-      router_address: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
-      factory_address: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
-      
-    - name: uniswap_v3
-      enabled: false
-      chain: ethereum
-      
-    - name: quickswap
-      enabled: false      # Enable in dashboard after adding Polygon private key
-      chain: polygon
-      router_address: "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff"
-      factory_address: "0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32"
-      
     - name: galaswap
-      enabled: false      # Enable in dashboard after adding private key
+      enabled: true       # Enabled for Binance → Galaswap arbitrage
       chain: gala          # 'gala' for Gala Chain (recommended) or 'ethereum' if available
       router_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap router address
       factory_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap factory address
@@ -122,17 +89,19 @@ networks:
 
 # ----- TRADING PAIRS -----
 # Format: BASE/QUOTE
+# Binance FDUSD pairs (BTC/FDUSD, ETH/FDUSD) for better liquidity and lower fees
+# GALA/USDT for Gala token trading
 trading_pairs:
-  - symbol: BTC/USDT
+  - symbol: BTC/FDUSD
     min_trade_amount: 0.001
     enabled: true
     
-  - symbol: ETH/USDT
-    min_trade_amount: 0.01
+  - symbol: ETH/FDUSD
+    min_trade_amount: 0.001
     enabled: true
     
-  - symbol: BNB/USDT
-    min_trade_amount: 0.1
+  - symbol: GALA/USDT
+    min_trade_amount: 0.01
     enabled: true
     
   - symbol: MATIC/USDT
@@ -175,6 +144,6 @@ storage:
 # ----- PERFORMANCE -----
 performance:
   max_concurrent_opportunities: 5
-  price_update_interval_ms: 100
+  price_update_interval_ms: 500  # 500ms = 2 requests/second per pair (reduces rate limit issues)
   order_book_depth: 10
 

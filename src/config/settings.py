@@ -29,6 +29,9 @@ class TradingConfig(BaseModel):
     max_slippage_percent: float = Field(gt=0, le=100)
     order_timeout_seconds: int = Field(gt=0)
     retry_attempts: int = Field(ge=1)
+    auto_discover_pairs: bool = Field(default=True, description="Automatically discover trading pairs from exchanges")
+    max_discovered_pairs: int = Field(default=200, ge=1, le=1000, description="Maximum number of pairs to auto-discover")
+    preferred_quote_currencies: List[str] = Field(default_factory=lambda: ['USDT', 'FDUSD', 'BTC', 'ETH', 'BUSD', 'USDC'], description="Prioritize pairs with these quote currencies")
 
 
 class RiskConfig(BaseModel):
@@ -128,6 +131,7 @@ class Settings(BaseSettings):
     eth_rpc_url: str = Field(default="", env="ETH_RPC_URL")
     bsc_rpc_url: str = Field(default="https://bsc-dataseed1.binance.org/", env="BSC_RPC_URL")
     polygon_rpc_url: str = Field(default="https://polygon-rpc.com/", env="POLYGON_RPC_URL")
+    gala_rpc_url: str = Field(default="https://jsonrpc.gala.games", env="GALA_RPC_URL")
     
     # Database
     postgres_host: str = Field(default="localhost", env="POSTGRES_HOST")
@@ -271,12 +275,6 @@ class Settings(BaseSettings):
             if exchange.name == "binance":
                 if not self.binance_api_key or not self.binance_api_secret:
                     errors.append("Binance API keys are required")
-            elif exchange.name == "okx":
-                if not self.okx_api_key or not self.okx_api_secret:
-                    errors.append("OKX API keys are required")
-            elif exchange.name == "bybit":
-                if not self.bybit_api_key or not self.bybit_api_secret:
-                    errors.append("Bybit API keys are required")
             elif exchange.name == "mexc":
                 if not self.mexc_api_key or not self.mexc_api_secret:
                     errors.append("MEXC API keys are required")
