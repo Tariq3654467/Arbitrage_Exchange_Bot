@@ -35,7 +35,7 @@ export default function HealthPage() {
   const loadLogs = async () => {
     try {
       const data = await systemApi.getLogs(undefined, 50);
-      setLogs(data.logs || []);
+      setLogs(data || []);
     } catch (err) {
       console.error('Error loading logs:', err);
     }

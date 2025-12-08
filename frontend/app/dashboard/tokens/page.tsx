@@ -23,7 +23,7 @@ export default function TokensPage() {
     try {
       setIsLoading(true);
       const data = await tokensApi.getPairs();
-      setPairs(data.pairs || []);
+      setPairs(data || []);
     } catch (err: any) {
       console.error('Error loading trading pairs:', err);
     } finally {
