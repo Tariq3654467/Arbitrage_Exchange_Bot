@@ -16,9 +16,11 @@ postgres_db: Optional[object] = None
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     """Verify basic authentication"""
-    # TODO: Load from config or environment
-    correct_username = "admin"
-    correct_password = "admin"  # Change this!
+    import os
+    
+    # Load from environment variables with fallback to defaults
+    correct_username = os.getenv("API_USERNAME", "admin")
+    correct_password = os.getenv("API_PASSWORD", "admin")
     
     if credentials.username != correct_username or credentials.password != correct_password:
         raise HTTPException(

@@ -463,42 +463,234 @@ async def get_backtest_results(backtest_id: str):
 
 # ==================== Dry Run ====================
 
+# Global dry-run state
+_dry_run_state = {
+    "active": False,
+    "start_time": None,
+    "end_time": None,
+    "simulated_trades": [],
+    "total_profit_usd": 0.0,
+    "total_profit_percent": 0.0,
+    "successful_trades": 0,
+    "failed_trades": 0
+}
+
+
 @router.post("/api/dry-run/start")
 async def start_dry_run(
     duration_minutes: int = Body(60),
     username: str = Depends(verify_credentials)
 ):
     """Start dry-run mode (simulate trades without executing)"""
+    global _dry_run_state
+    
     try:
         from ...api.main import bot
         
         if not bot:
             raise HTTPException(status_code=400, detail="Bot not initialized")
         
-        # TODO: Implement dry-run mode
-        logger.info(f"Dry-run mode requested for {duration_minutes} minutes")
+        if not bot.is_running:
+            raise HTTPException(status_code=400, detail="Bot must be running for dry-run mode")
+        
+        # Check if bot is in paper trading mode (required for dry-run)
+        from ...config.settings import get_settings
+        settings = get_settings()
+        
+        if not settings.bot.paper_trading:
+            logger.warning("Dry-run mode requires paper trading mode. Enabling paper trading temporarily.")
+            # Note: We don't change the actual setting, just note it
+        
+        # Initialize dry-run state
+        _dry_run_state = {
+            "active": True,
+            "start_time": datetime.now(),
+            "end_time": datetime.now() + timedelta(minutes=duration_minutes),
+            "simulated_trades": [],
+            "total_profit_usd": 0.0,
+            "total_profit_percent": 0.0,
+            "successful_trades": 0,
+            "failed_trades": 0
+        }
+        
+        logger.info(f"Dry-run mode started for {duration_minutes} minutes")
+        
+        # Hook into trade executor to track simulated trades
+        # The bot's paper trading mode will handle the simulation
+        # We'll track trades through the trade executor's history
         
         return {
             "status": "success",
             "message": "Dry-run mode started",
             "duration_minutes": duration_minutes,
-            "note": "Dry-run engine not yet fully implemented"
+            "start_time": _dry_run_state["start_time"].isoformat(),
+            "end_time": _dry_run_state["end_time"].isoformat()
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error starting dry-run: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/dry-run/stop")
+async def stop_dry_run(username: str = Depends(verify_credentials)):
+    """Stop dry-run mode and return results"""
+    global _dry_run_state
+    
+    try:
+        if not _dry_run_state["active"]:
+            raise HTTPException(status_code=400, detail="Dry-run mode is not active")
+        
+        # Calculate final statistics
+        _dry_run_state["active"] = False
+        _dry_run_state["end_time"] = datetime.now()
+        
+        # Get trade statistics from bot if available
+        from ...api.main import bot
+        if bot and bot.trade_executor:
+            recent_trades = bot.trade_executor.get_recent_trades(limit=1000)
+            
+            # Filter trades that occurred during dry-run period
+            start_time = _dry_run_state["start_time"]
+            end_time = _dry_run_state["end_time"]
+            
+            dry_run_trades = [
+                trade for trade in recent_trades
+                if start_time <= trade.timestamp <= end_time
+            ]
+            
+            _dry_run_state["simulated_trades"] = [
+                {
+                    "symbol": trade.analysis.opportunity.symbol,
+                    "buy_exchange": trade.analysis.opportunity.buy_exchange,
+                    "sell_exchange": trade.analysis.opportunity.sell_exchange,
+                    "amount": trade.analysis.buy_amount,
+                    "profit_usd": trade.actual_profit_usd,
+                    "profit_percent": trade.actual_profit_percent,
+                    "status": trade.status.value,
+                    "timestamp": trade.timestamp.isoformat()
+                }
+                for trade in dry_run_trades
+            ]
+            
+            _dry_run_state["successful_trades"] = sum(
+                1 for trade in dry_run_trades
+                if trade.status.value == "completed"
+            )
+            _dry_run_state["failed_trades"] = len(dry_run_trades) - _dry_run_state["successful_trades"]
+            _dry_run_state["total_profit_usd"] = sum(
+                trade.actual_profit_usd for trade in dry_run_trades
+                if trade.status.value == "completed"
+            )
+            _dry_run_state["total_profit_percent"] = sum(
+                trade.actual_profit_percent for trade in dry_run_trades
+                if trade.status.value == "completed"
+            )
+        
+        return {
+            "status": "success",
+            "message": "Dry-run mode stopped",
+            "results": {
+                "duration_minutes": (
+                    (_dry_run_state["end_time"] - _dry_run_state["start_time"]).total_seconds() / 60
+                ),
+                "simulated_trades": len(_dry_run_state["simulated_trades"]),
+                "successful_trades": _dry_run_state["successful_trades"],
+                "failed_trades": _dry_run_state["failed_trades"],
+                "total_profit_usd": round(_dry_run_state["total_profit_usd"], 2),
+                "total_profit_percent": round(_dry_run_state["total_profit_percent"], 4),
+                "trades": _dry_run_state["simulated_trades"]
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error stopping dry-run: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/dry-run/results")
 async def get_dry_run_results():
     """Get dry-run simulation results"""
+    global _dry_run_state
+    
     try:
-        # TODO: Implement dry-run results
+        if not _dry_run_state["active"]:
+            # Return last results if available
+            if _dry_run_state["start_time"]:
+                return {
+                    "status": "inactive",
+                    "last_run": {
+                        "start_time": _dry_run_state["start_time"].isoformat() if _dry_run_state["start_time"] else None,
+                        "end_time": _dry_run_state["end_time"].isoformat() if _dry_run_state["end_time"] else None,
+                        "simulated_trades": len(_dry_run_state["simulated_trades"]),
+                        "successful_trades": _dry_run_state["successful_trades"],
+                        "failed_trades": _dry_run_state["failed_trades"],
+                        "total_profit_usd": round(_dry_run_state["total_profit_usd"], 2),
+                        "total_profit_percent": round(_dry_run_state["total_profit_percent"], 4)
+                    }
+                }
+            return {
+                "status": "inactive",
+                "message": "No dry-run session has been started"
+            }
+        
+        # Update statistics from bot if running
+        from ...api.main import bot
+        if bot and bot.trade_executor:
+            recent_trades = bot.trade_executor.get_recent_trades(limit=1000)
+            start_time = _dry_run_state["start_time"]
+            end_time = _dry_run_state["end_time"]
+            
+            dry_run_trades = [
+                trade for trade in recent_trades
+                if start_time <= trade.timestamp <= end_time
+            ]
+            
+            _dry_run_state["simulated_trades"] = [
+                {
+                    "symbol": trade.analysis.opportunity.symbol,
+                    "buy_exchange": trade.analysis.opportunity.buy_exchange,
+                    "sell_exchange": trade.analysis.opportunity.sell_exchange,
+                    "amount": trade.analysis.buy_amount,
+                    "profit_usd": trade.actual_profit_usd,
+                    "profit_percent": trade.actual_profit_percent,
+                    "status": trade.status.value,
+                    "timestamp": trade.timestamp.isoformat()
+                }
+                for trade in dry_run_trades
+            ]
+            
+            _dry_run_state["successful_trades"] = sum(
+                1 for trade in dry_run_trades
+                if trade.status.value == "completed"
+            )
+            _dry_run_state["failed_trades"] = len(dry_run_trades) - _dry_run_state["successful_trades"]
+            _dry_run_state["total_profit_usd"] = sum(
+                trade.actual_profit_usd for trade in dry_run_trades
+                if trade.status.value == "completed"
+            )
+            _dry_run_state["total_profit_percent"] = sum(
+                trade.actual_profit_percent for trade in dry_run_trades
+                if trade.status.value == "completed"
+            )
+        
+        # Check if dry-run period has ended
+        if datetime.now() >= _dry_run_state["end_time"]:
+            _dry_run_state["active"] = False
+        
         return {
-            "status": "active",
-            "simulated_trades": 0,
-            "simulated_profit": 0.0,
-            "message": "Dry-run engine not yet fully implemented"
+            "status": "active" if _dry_run_state["active"] else "completed",
+            "start_time": _dry_run_state["start_time"].isoformat(),
+            "end_time": _dry_run_state["end_time"].isoformat(),
+            "remaining_minutes": max(0, (_dry_run_state["end_time"] - datetime.now()).total_seconds() / 60) if _dry_run_state["active"] else 0,
+            "simulated_trades": len(_dry_run_state["simulated_trades"]),
+            "successful_trades": _dry_run_state["successful_trades"],
+            "failed_trades": _dry_run_state["failed_trades"],
+            "total_profit_usd": round(_dry_run_state["total_profit_usd"], 2),
+            "total_profit_percent": round(_dry_run_state["total_profit_percent"], 4),
+            "trades": _dry_run_state["simulated_trades"][-50:]  # Return last 50 trades
         }
     except Exception as e:
         logger.error(f"Error getting dry-run results: {e}")

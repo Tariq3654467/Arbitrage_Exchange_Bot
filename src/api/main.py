@@ -506,7 +506,36 @@ async def update_trading_config(
             settings.bot.paper_trading = config.paper_trading
             logger.info(f"Paper trading mode set to: {config.paper_trading}")
         
-        # TODO: Save to config file
+        # Save to config file
+        try:
+            import yaml
+            from pathlib import Path
+            config_path = Path("config/config.yaml")
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config_data = yaml.safe_load(f) or {}
+                
+                # Update trading section
+                if 'trading' not in config_data:
+                    config_data['trading'] = {}
+                config_data['trading']['min_profit_threshold'] = config.min_profit_threshold
+                config_data['trading']['max_trade_size_percent'] = config.max_trade_size_percent
+                config_data['trading']['max_slippage_percent'] = config.max_slippage_percent
+                
+                # Update bot section for paper_trading
+                if 'bot' not in config_data:
+                    config_data['bot'] = {}
+                if config.paper_trading is not None:
+                    config_data['bot']['paper_trading'] = config.paper_trading
+                
+                # Write back to file
+                with open(config_path, 'w') as f:
+                    yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+                logger.info("Trading configuration saved to config file")
+            else:
+                logger.warning(f"Config file not found at {config_path}, skipping save")
+        except Exception as e:
+            logger.warning(f"Could not save trading config to file: {e}")
         
         return {"status": "success", "message": "Trading config updated"}
     
@@ -582,6 +611,32 @@ async def update_risk_config(
             bot.risk_manager.max_drawdown_percent = config.max_drawdown_percent
             bot.risk_manager.max_daily_loss_percent = config.max_daily_loss_percent
             bot.risk_manager.max_position_size_usd = config.max_position_size_usd
+        
+        # Save to config file
+        try:
+            import yaml
+            from pathlib import Path
+            config_path = Path("config/config.yaml")
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config_data = yaml.safe_load(f) or {}
+                
+                # Update risk section
+                if 'risk' not in config_data:
+                    config_data['risk'] = {}
+                config_data['risk']['max_drawdown_percent'] = config.max_drawdown_percent
+                config_data['risk']['max_daily_loss_percent'] = config.max_daily_loss_percent
+                config_data['risk']['max_position_size_usd'] = config.max_position_size_usd
+                config_data['risk']['emergency_stop_enabled'] = config.emergency_stop_enabled
+                
+                # Write back to file
+                with open(config_path, 'w') as f:
+                    yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+                logger.info("Risk configuration saved to config file")
+            else:
+                logger.warning(f"Config file not found at {config_path}, skipping save")
+        except Exception as e:
+            logger.warning(f"Could not save risk config to file: {e}")
         
         return {"status": "success", "message": "Risk config updated"}
     
