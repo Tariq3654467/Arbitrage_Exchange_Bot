@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 import { botApi, BotStatus } from '@/lib/api';
 import { useWebSocket } from '@/lib/useWebSocket';
 
-const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const wsBase = apiBase.replace(/^http/, 'ws');
+// For WebSocket, use localhost since it can't be proxied through Next.js
+// The backend is exposed on localhost:8000 from the host
+const wsBase = typeof window !== 'undefined'
+  ? 'ws://localhost:8000'  // Client-side: use localhost (backend is exposed on host)
+  : (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/^http/, 'ws');  // Server-side: use Docker hostname
 
 export function useBotStatus() {
   const [status, setStatus] = useState<BotStatus | null>(null);

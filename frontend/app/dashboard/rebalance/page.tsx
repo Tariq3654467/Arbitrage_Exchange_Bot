@@ -17,6 +17,7 @@ export default function RebalancePage() {
     loadAllocation();
     const interval = setInterval(loadAllocation, 5000);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadAllocation = async () => {

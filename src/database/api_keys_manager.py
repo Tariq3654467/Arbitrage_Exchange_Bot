@@ -295,8 +295,18 @@ class APIKeysManager:
                     # Happens if encryption key changed since keys were saved
                     logger.error(
                         "Encryption key mismatch when reading keys for %s. "
-                        "You may need to reset stored API keys (truncate api_keys table).",
+                        "You may need to reset stored API keys (truncate api_keys table) "
+                        "or set ENCRYPTION_KEY environment variable to match the original key.",
                         exchange_name,
+                    )
+                    # Return None to indicate keys cannot be decrypted
+                    return None
+                except Exception as decrypt_error:
+                    # Catch any other decryption errors
+                    logger.error(
+                        "Error decrypting keys for %s: %s",
+                        exchange_name,
+                        str(decrypt_error),
                     )
                     return None
 

@@ -24,6 +24,7 @@ psycopg2-binary==2.9.9          # PostgreSQL
 influxdb-client==1.40.0         # Time-series data
 redis==5.0.1                    # Caching
 sqlalchemy==2.0.25              # ORM
+greenlet>=3.0.0                 # Required by SQLAlchemy
 
 # Security
 cryptography==42.0.2

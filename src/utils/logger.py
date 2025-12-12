@@ -48,30 +48,41 @@ class BotLogger:
         console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
         
-        # File handler for all logs
-        log_file = self.log_dir / f"arbitrage_bot_{datetime.now().strftime('%Y%m%d')}.log"
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)  # Always log everything to file
-        
+        # File handler for all logs (with error handling for permission issues)
         file_formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
+        
+        try:
+            log_file = self.log_dir / f"arbitrage_bot_{datetime.now().strftime('%Y%m%d')}.log"
+            file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            file_handler.setLevel(logging.DEBUG)  # Always log everything to file
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Could not create log file handler: {e}. Logging to console only.")
         
         # Separate file handler for errors
-        error_log_file = self.log_dir / f"errors_{datetime.now().strftime('%Y%m%d')}.log"
-        error_handler = logging.FileHandler(error_log_file, encoding='utf-8')
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(file_formatter)
-        logger.addHandler(error_handler)
+        try:
+            error_log_file = self.log_dir / f"errors_{datetime.now().strftime('%Y%m%d')}.log"
+            error_handler = logging.FileHandler(error_log_file, encoding='utf-8')
+            error_handler.setLevel(logging.ERROR)
+            error_handler.setFormatter(file_formatter)
+            logger.addHandler(error_handler)
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Could not create error log file handler: {e}.")
         
         # Separate file handler for trades
-        trade_log_file = self.log_dir / f"trades_{datetime.now().strftime('%Y%m%d')}.log"
-        self.trade_handler = logging.FileHandler(trade_log_file, encoding='utf-8')
-        self.trade_handler.setLevel(logging.INFO)
-        self.trade_handler.setFormatter(file_formatter)
+        try:
+            trade_log_file = self.log_dir / f"trades_{datetime.now().strftime('%Y%m%d')}.log"
+            self.trade_handler = logging.FileHandler(trade_log_file, encoding='utf-8')
+            self.trade_handler.setLevel(logging.INFO)
+            self.trade_handler.setFormatter(file_formatter)
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Could not create trade log file handler: {e}.")
+            # Create a dummy handler to prevent errors when log_trade is called
+            self.trade_handler = logging.NullHandler()
         
         return logger
     
