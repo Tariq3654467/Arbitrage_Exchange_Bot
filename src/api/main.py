@@ -657,8 +657,11 @@ async def get_current_prices(all_pairs: bool = False):
     """
     global bot
     
-    if not bot or not bot.exchanges:
-        return {"error": "Bot not running or no exchanges connected"}
+    if not bot:
+        return {"error": "Bot not running. Please start the bot first.", "prices": {}}
+    
+    if not bot.exchanges:
+        return {"error": "No exchanges connected. Please configure and connect exchanges.", "prices": {}}
     
     prices = {}
     
@@ -715,26 +718,59 @@ async def get_current_prices(all_pairs: bool = False):
                 # For DEX exchanges (like Galaswap), try to get available pairs
                 elif exchange_name == 'galaswap':
                     # Galaswap uses a different API structure
-                    # Try to get prices for configured trading pairs
+                    # Try to get prices for configured trading pairs and common Gala Chain pairs
                     try:
+                        # Collect symbols to fetch
+                        symbols_to_fetch = set()
+                        
                         # Get trading pairs from price monitor if available
                         if bot.price_monitor:
-                            for symbol in bot.price_monitor.trading_pairs:
-                                try:
-                                    ticker = await exchange.get_ticker(symbol)
-                                    if ticker and ticker.get('bid') and ticker.get('ask'):
-                                        if symbol not in prices:
-                                            prices[symbol] = {}
-                                        prices[symbol][exchange_name] = {
-                                            "bid": ticker.get('bid'),
-                                            "ask": ticker.get('ask'),
-                                            "mid": (ticker.get('bid') + ticker.get('ask')) / 2,
-                                            "spread": ticker.get('ask') - ticker.get('bid'),
-                                            "timestamp": ticker.get('timestamp', datetime.now()).isoformat() if hasattr(ticker.get('timestamp'), 'isoformat') else datetime.now().isoformat()
-                                        }
-                                except Exception as e:
-                                    logger.debug(f"Could not fetch {symbol} from {exchange_name}: {e}")
-                                    continue
+                            symbols_to_fetch.update(bot.price_monitor.trading_pairs)
+                        
+                        # Also try common Gala Chain pairs if we have balances
+                        if hasattr(exchange, 'get_balance'):
+                            try:
+                                balances = await exchange.get_balance()
+                                # Extract symbols from balances (GALA, GUSDT, GUSDC, GWETH, etc.)
+                                for balance_symbol in balances.keys():
+                                    # Try common pair combinations
+                                    common_quotes = ['GUSDT', 'GUSDC', 'GALA', 'GWETH']
+                                    for quote in common_quotes:
+                                        if balance_symbol != quote:
+                                            # Try both directions
+                                            symbols_to_fetch.add(f"{balance_symbol}/{quote}")
+                                            symbols_to_fetch.add(f"{quote}/{balance_symbol}")
+                            except Exception as e:
+                                logger.debug(f"Could not get balances for Galaswap pair discovery: {e}")
+                        
+                        # If no symbols found, try some default Gala Chain pairs
+                        if not symbols_to_fetch:
+                            default_pairs = ['GALA/GUSDT', 'GUSDT/GALA', 'GALA/GUSDC', 'GUSDC/GALA', 
+                                           'GALA/GWETH', 'GWETH/GALA', 'GUSDT/GUSDC', 'GUSDC/GUSDT']
+                            symbols_to_fetch.update(default_pairs)
+                        
+                        # Fetch prices for discovered symbols
+                        processed_count = 0
+                        max_pairs_per_exchange = 1000
+                        for symbol in symbols_to_fetch:
+                            if processed_count >= max_pairs_per_exchange:
+                                break
+                            try:
+                                ticker = await exchange.get_ticker(symbol)
+                                if ticker and ticker.get('bid') and ticker.get('ask'):
+                                    if symbol not in prices:
+                                        prices[symbol] = {}
+                                    prices[symbol][exchange_name] = {
+                                        "bid": ticker.get('bid'),
+                                        "ask": ticker.get('ask'),
+                                        "mid": (ticker.get('bid') + ticker.get('ask')) / 2,
+                                        "spread": ticker.get('ask') - ticker.get('bid'),
+                                        "timestamp": ticker.get('timestamp', datetime.now()).isoformat() if hasattr(ticker.get('timestamp'), 'isoformat') else datetime.now().isoformat()
+                                    }
+                                    processed_count += 1
+                            except Exception as e:
+                                logger.debug(f"Could not fetch {symbol} from {exchange_name}: {e}")
+                                continue
                     except Exception as e:
                         logger.debug(f"Error fetching Galaswap market data: {e}")
             except Exception as e:
@@ -810,7 +846,10 @@ async def get_current_prices(all_pairs: bool = False):
                         except Exception as e:
                             error_msg = str(e)
                             # Don't log errors for invalid pairs - they're expected
-                            if 'does not have market symbol' not in error_msg and 'Invalid symbol' not in error_msg:
+                            # Also don't log for Galaswap API errors as they're common when pairs don't exist
+                            if ('does not have market symbol' not in error_msg and 
+                                'Invalid symbol' not in error_msg and
+                                exchange_name != 'galaswap'):
                                 logger.debug(f"Could not fetch {symbol} from {exchange_name} (fallback): {e}")
                             continue
     

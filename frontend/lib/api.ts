@@ -22,6 +22,12 @@ const api = axios.create({
     username: 'admin',
     password: 'admin', // TODO: Make this configurable
   },
+  // Increase timeout for long-running requests
+  timeout: 30000, // 30 seconds
+  // Retry configuration
+  validateStatus: function (status) {
+    return status < 500; // Don't throw for 4xx errors, only 5xx
+  },
 });
 
 // Types

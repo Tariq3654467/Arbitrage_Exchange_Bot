@@ -94,14 +94,25 @@ class PortfolioManager:
                 try:
                     balances = await exchange.get_balance()
                     
-                    for asset, balance in balances.items():
+                    for asset_key, balance in balances.items():
                         if balance.total > 0:
-                            all_balances[asset]['total_amount'] += balance.total
-                            all_balances[asset]['balances_by_exchange'][exchange_name] = balance.total
+                            # Use the display name from balance.asset if the key is "UNKNOWN"
+                            # This helps with cases where the key might be "UNKNOWN" but balance.asset has the real name
+                            if asset_key == "UNKNOWN" and balance.asset and balance.asset != "UNKNOWN" and balance.asset != "Unknown Token":
+                                # Extract a clean identifier from the display name (remove parentheses content)
+                                import re
+                                clean_name = re.sub(r'\s*\([^)]*\)\s*', '', balance.asset).strip()
+                                asset_identifier = clean_name if clean_name else balance.asset
+                            else:
+                                asset_identifier = asset_key
+                            
+                            all_balances[asset_identifier]['total_amount'] += balance.total
+                            all_balances[asset_identifier]['balances_by_exchange'][exchange_name] = balance.total
                             
                             # Get price (simplified - would use real price feeds)
-                            price_usd = self.price_feeds.get(asset, 0.0)
-                            all_balances[asset]['prices_usd'][exchange_name] = price_usd
+                            # Try both the asset_key and asset_identifier for price lookup
+                            price_usd = self.price_feeds.get(asset_identifier, self.price_feeds.get(asset_key, 0.0))
+                            all_balances[asset_identifier]['prices_usd'][exchange_name] = price_usd
                 
                 except Exception as e:
                     error_msg = (

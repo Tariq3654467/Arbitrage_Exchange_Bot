@@ -1,6 +1,7 @@
 'use client';
 
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { formatExchangeName } from '@/lib/exchangeUtils';
 
 interface PriceDataPoint {
   time: string;
@@ -74,7 +75,7 @@ export default function PriceChart({ data, exchanges, dataKey, title }: PriceCha
               stroke={colors[idx % colors.length]}
               strokeWidth={2}
               dot={false}
-              name={exchange}
+              name={formatExchangeName(exchange)}
             />
           ))}
         </LineChart>

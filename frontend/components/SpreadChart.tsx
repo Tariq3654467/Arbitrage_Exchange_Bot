@@ -1,6 +1,7 @@
 'use client';
 
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Area, AreaChart } from 'recharts';
+import { formatExchangeName } from '@/lib/exchangeUtils';
 
 interface SpreadDataPoint {
   time: string;
@@ -91,7 +92,7 @@ export default function SpreadChart({ data, exchanges, title }: SpreadChartProps
               stroke={colors[idx % colors.length]}
               fill={`url(#color${exchange})`}
               strokeWidth={2}
-              name={exchange}
+              name={formatExchangeName(exchange)}
             />
           ))}
         </AreaChart>

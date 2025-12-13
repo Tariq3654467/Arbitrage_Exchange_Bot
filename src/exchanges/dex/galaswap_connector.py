@@ -803,10 +803,32 @@ class GalaswapConnector(BaseExchange):
             balances = {}
             data = response.get("Data", [])
             
+            if not data:
+                logger.debug("No token data returned from Galaswap balance API")
+            
             for token_data in data:
                 try:
                     token_class = token_data.get("tokenClass", {})
-                    collection = token_class.get("collection", "")
+                    
+                    # Try multiple fields to get the collection/symbol
+                    collection = (
+                        token_class.get("collection") or
+                        token_class.get("symbol") or
+                        token_data.get("collection") or
+                        token_data.get("symbol") or
+                        ""
+                    )
+                    
+                    # Get token name from various possible fields
+                    token_name = (
+                        token_data.get("name") or
+                        token_data.get("tokenName") or
+                        token_data.get("displayName") or
+                        token_class.get("name") or
+                        token_class.get("tokenName") or
+                        token_class.get("displayName") or
+                        None
+                    )
                     
                     # Handle quantity - might be a list or single value
                     quantity_raw = token_data.get("quantity", "0")
@@ -829,43 +851,76 @@ class GalaswapConnector(BaseExchange):
                         locked = float(locked_raw) if locked_raw else 0.0
                     
                     if quantity > 0 or locked > 0:
-                        # Use collection as symbol, format it properly
-                        symbol = collection.upper() if collection else "UNKNOWN"
+                        # Determine symbol - try collection first, then derive from name
+                        if collection:
+                            symbol = collection.upper().strip()
+                        elif token_name:
+                            # Try to extract symbol from token name (e.g., "Gala Token" -> "GALA")
+                            # First check if it matches any known token name
+                            symbol = None
+                            for known_symbol, known_name in self.token_names.items():
+                                if token_name.lower() == known_name.lower() or known_name.lower() in token_name.lower():
+                                    symbol = known_symbol
+                                    break
+                            
+                            # If no match, try to create symbol from name
+                            if not symbol:
+                                # Remove common words and create symbol
+                                name_clean = token_name.replace("Token", "").replace("Coin", "").strip()
+                                # Take first word or first few letters
+                                words = name_clean.split()
+                                if words:
+                                    symbol = words[0].upper()[:10]  # Limit length
+                                else:
+                                    symbol = name_clean.upper()[:10] if name_clean else "UNKNOWN"
+                        else:
+                            # Last resort: try to use category or type
+                            category = token_class.get("category", "")
+                            type_info = token_class.get("type", "")
+                            if category and category.upper() not in ["UNIT", "NONE", ""]:
+                                symbol = category.upper()[:10]
+                            elif type_info and type_info.upper() not in ["UNIT", "NONE", ""]:
+                                symbol = type_info.upper()[:10]
+                            else:
+                                # Log the raw data for debugging - this helps identify what fields are available
+                                logger.warning(
+                                    f"Could not determine symbol for Galaswap token. "
+                                    f"Collection: {collection}, Token name: {token_name}, "
+                                    f"Category: {token_class.get('category', 'N/A')}, "
+                                    f"Type: {token_class.get('type', 'N/A')}. "
+                                    f"Full token_data keys: {list(token_data.keys())}, "
+                                    f"tokenClass keys: {list(token_class.keys())}"
+                                )
+                                symbol = "UNKNOWN"
                         
-                        # Get actual token name from mapping or API response
-                        token_name = None
-                        
-                        # Check if API response has a name field
-                        if "name" in token_data:
-                            token_name = token_data.get("name")
-                        elif "tokenName" in token_data:
-                            token_name = token_data.get("tokenName")
-                        elif "displayName" in token_data:
-                            token_name = token_data.get("displayName")
-                        
-                        # If no name in API, use our mapping
-                        if not token_name:
+                        # Get actual token name from mapping if we have a symbol
+                        if not token_name and symbol:
                             token_name = self.token_names.get(symbol, symbol)
+                        elif not token_name:
+                            token_name = symbol
                         
                         # Try to get additional info from token class
                         category = token_class.get("category", "")
                         type_info = token_class.get("type", "")
                         
                         # Create display name: "Token Name (SYMBOL)" or just "Token Name"
-                        if token_name and token_name != symbol:
+                        if token_name and token_name != symbol and symbol != "UNKNOWN":
                             display_name = f"{token_name} ({symbol})"
-                        elif category and category.lower() not in ["unit", "none", ""]:
+                        elif token_name and token_name != symbol:
+                            display_name = token_name
+                        elif category and category.lower() not in ["unit", "none", ""] and symbol != "UNKNOWN":
                             display_name = f"{symbol} ({category.upper()})"
                         else:
-                            display_name = symbol
+                            display_name = symbol if symbol != "UNKNOWN" else (token_name or "Unknown Token")
                         
+                        # Use symbol as key, but display_name for the asset field
                         balances[symbol] = Balance(
                             asset=display_name,  # Use actual token name for better readability
                             free=quantity - locked,
                             locked=locked
                         )
                 except Exception as e:
-                    logger.warning(f"Error parsing balance for token {token_data.get('tokenClass', {}).get('collection', 'unknown')}: {e}")
+                    logger.warning(f"Error parsing balance for token: {e}. Token data: {json.dumps(token_data, default=str)[:200]}")
                     continue
             
             # Filter by asset if specified

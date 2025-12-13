@@ -13,6 +13,11 @@ const nextConfig = {
       },
     ];
   },
+  // Add timeout configuration for API routes
+  experimental: {
+    // Increase timeout for long-running requests
+    serverComponentsExternalPackages: [],
+  },
   // Increase timeout for long-running API requests
   serverRuntimeConfig: {
     // Timeout for API proxy requests (in milliseconds)

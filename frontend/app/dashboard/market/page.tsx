@@ -8,12 +8,13 @@ import { Badge } from '@/components/ui/Badge';
 import PriceChart from '@/components/PriceChart';
 import PriceComparisonChart from '@/components/PriceComparisonChart';
 import SpreadChart from '@/components/SpreadChart';
+import { formatExchangeName } from '@/lib/exchangeUtils';
 
 export default function MarketPage() {
   // Default to showing all pairs to display complete market data
   const [showAllPairs, setShowAllPairs] = useState(true);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
-  const { prices, isLoading } = usePrices(showAllPairs, 2000);
+  const { prices, isLoading, error } = usePrices(showAllPairs, 2000);
 
   const symbols = Object.keys(prices);
   const currentSymbol = selectedSymbol || symbols[0];
@@ -75,10 +76,27 @@ export default function MarketPage() {
           <div className="flex items-center justify-center py-12">
             <div className="text-slate-400">Loading market data...</div>
           </div>
+        ) : error ? (
+          <Card>
+            <CardContent className="py-12 text-center">
+              <div className="text-red-400 font-medium mb-2">Error loading market data</div>
+              <div className="text-slate-400 text-sm">{error}</div>
+              {error.includes('Bot not running') && (
+                <div className="mt-4 text-slate-500 text-xs">
+                  Please start the bot from the Dashboard page first.
+                </div>
+              )}
+              {error.includes('No exchanges connected') && (
+                <div className="mt-4 text-slate-500 text-xs">
+                  Please configure and connect exchanges from the Settings page.
+                </div>
+              )}
+            </CardContent>
+          </Card>
         ) : !symbols.length ? (
           <Card>
             <CardContent className="py-12 text-center text-slate-400">
-              No market data available yet. Ensure the bot is running.
+              No market data available yet. Ensure the bot is running and exchanges are connected.
             </CardContent>
           </Card>
         ) : (
@@ -170,7 +188,7 @@ export default function MarketPage() {
                         key={ex}
                         className="flex items-center justify-between rounded-md bg-slate-900/80 px-3 py-2"
                       >
-                        <span className="font-medium text-slate-200">{ex}</span>
+                        <span className="font-medium text-slate-200">{formatExchangeName(ex)}</span>
                         <div className="flex gap-4 tabular-nums text-slate-300">
                           <span>Bid: ${bid}</span>
                           <span>Ask: ${ask}</span>

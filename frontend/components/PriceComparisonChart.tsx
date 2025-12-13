@@ -1,6 +1,7 @@
 'use client';
 
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { formatExchangeName } from '@/lib/exchangeUtils';
 
 interface ComparisonData {
   exchange: string;
@@ -35,6 +36,7 @@ export default function PriceComparisonChart({ data, symbol }: PriceComparisonCh
             dataKey="exchange"
             stroke="#94a3b8"
             style={{ fontSize: '11px' }}
+            tickFormatter={(value) => formatExchangeName(value)}
           />
           <YAxis
             stroke="#94a3b8"

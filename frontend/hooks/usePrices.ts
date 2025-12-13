@@ -22,10 +22,18 @@ export function usePrices(showAllPairs: boolean = false, refreshInterval: number
     try {
       setError(null);
       const data = await marketApi.getPrices(showAllPairs);
-      setPrices(data || {});
+      
+      // Check if response has an error
+      if (data && 'error' in data) {
+        setError(data.error);
+        setPrices(data.prices || {});
+      } else {
+        setPrices(data || {});
+      }
       setIsLoading(false);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load prices');
+      const errorMessage = err?.response?.data?.error || err?.message || 'Failed to load prices';
+      setError(errorMessage);
       setIsLoading(false);
     }
   };
