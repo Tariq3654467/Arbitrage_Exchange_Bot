@@ -28,14 +28,12 @@ services:
         max-file: "3"
 
   # Next.js Frontend
-  # Next.js Frontend
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        - NEXT_PUBLIC_API_URL=http://dashboard:8000
-    container_name: arbitrage_frontend
->>>>>>> 4716d7a974a6c4e0e0dcbcd556ec1ac71d210dc6
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - NEXT_PUBLIC_API_URL=http://dashboard:8000
+    container_name: arbitrage_frontend
     restart: unless-stopped
     environment:
       - NODE_ENV=production
