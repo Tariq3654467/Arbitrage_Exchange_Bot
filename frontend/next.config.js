@@ -13,6 +13,10 @@ const nextConfig = {
       },
     ];
   },
+  // Increase proxy timeout for API requests
+  httpAgentOptions: {
+    timeout: 60000, // 60 seconds
+  },
   // Add timeout configuration for API routes
   experimental: {
     // Increase timeout for long-running requests
