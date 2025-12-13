@@ -232,7 +232,14 @@ class ArbitrageBot:
         
         # PostgreSQL
         try:
-            self.postgres_db = PostgresManager(self.settings.postgres_url)
+            # Use individual parameters to avoid connection string parsing issues with special characters
+            self.postgres_db = PostgresManager(
+                host=self.settings.postgres_host,
+                port=self.settings.postgres_port,
+                database=self.settings.postgres_db,
+                user=self.settings.postgres_user,
+                password=self.settings.postgres_password
+            )
             self.postgres_db.connect()
             logger.info("✓ Connected to PostgreSQL")
         except Exception as e:

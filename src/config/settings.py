@@ -235,7 +235,10 @@ class Settings(BaseSettings):
     @property
     def postgres_url(self) -> str:
         """Generate PostgreSQL connection URL"""
-        return f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        from urllib.parse import quote_plus
+        # URL-encode password to handle special characters like /, =, +, etc.
+        encoded_password = quote_plus(self.postgres_password)
+        return f"postgresql://{self.postgres_user}:{encoded_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
     
     @property
     def redis_url(self) -> str:

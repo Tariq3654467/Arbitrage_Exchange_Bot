@@ -67,7 +67,14 @@ async def startup_event():
         from ..config.settings import get_settings
         
         settings = get_settings()
-        db_instance = PostgresManager(settings.postgres_url)
+        # Use individual parameters to avoid connection string parsing issues with special characters
+        db_instance = PostgresManager(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            database=settings.postgres_db,
+            user=settings.postgres_user,
+            password=settings.postgres_password
+        )
         db_instance.connect()
         # Set the global postgres_db in dependencies module
         deps.postgres_db = db_instance

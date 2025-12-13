@@ -17,14 +17,31 @@ logger = get_logger()
 class PostgresManager:
     """Manages PostgreSQL database operations"""
     
-    def __init__(self, connection_string: str):
+    def __init__(self, connection_string: str = None, host: str = None, port: int = None, 
+                 database: str = None, user: str = None, password: str = None):
         """
         Initialize PostgreSQL manager
         
         Args:
-            connection_string: PostgreSQL connection string
+            connection_string: PostgreSQL connection string (deprecated, use individual params)
+            host: Database host
+            port: Database port
+            database: Database name
+            user: Database user
+            password: Database password
         """
-        self.connection_string = connection_string
+        # Support both connection string and individual parameters
+        if connection_string:
+            self.connection_string = connection_string
+            self.use_connection_string = True
+        else:
+            self.host = host
+            self.port = port
+            self.database = database
+            self.user = user
+            self.password = password
+            self.use_connection_string = False
+        
         self.conn = None
         
         logger.info("PostgreSQL manager initialized")
@@ -32,7 +49,17 @@ class PostgresManager:
     def connect(self):
         """Connect to PostgreSQL database"""
         try:
-            self.conn = psycopg2.connect(self.connection_string)
+            if self.use_connection_string:
+                self.conn = psycopg2.connect(self.connection_string)
+            else:
+                # Use individual parameters to avoid connection string parsing issues
+                self.conn = psycopg2.connect(
+                    host=self.host,
+                    port=self.port,
+                    database=self.database,
+                    user=self.user,
+                    password=self.password
+                )
             logger.info("Connected to PostgreSQL database")
             self._initialize_schema()
         except Exception as e:
