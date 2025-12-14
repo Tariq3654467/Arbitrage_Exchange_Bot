@@ -687,13 +687,14 @@ class GalaswapConnector(BaseExchange):
             
             # Fetch available swaps (we want to buy base with quote)
             # So we offer quote and want base
+            # API expects token class objects, not strings
             try:
                 response = await self._make_unsigned_request(
                     "POST",
                     "/v1/FetchAvailableTokenSwaps",
                     {
-                        "offeredTokenClass": quote_class,  # What we're offering
-                        "wantedTokenClass": base_class     # What we want
+                        "offeredTokenClass": quote_class,  # Dict object: {collection, category, type, additionalKey}
+                        "wantedTokenClass": base_class     # Dict object: {collection, category, type, additionalKey}
                     }
                 )
             except Exception as api_error:
