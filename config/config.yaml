@@ -52,8 +52,8 @@ exchanges:
       max_latency_ms: 50
       websocket_enabled: true
 
-# ----- DEX EXCHANGES -----
-# Disabled by default - enable in dashboard after adding private keys
+  # DEX EXCHANGES
+  # Disabled by default - enable in dashboard after adding private keys
   dex:
     - name: galaswap
       enabled: true       # Enabled for Binance → Galaswap arbitrage
