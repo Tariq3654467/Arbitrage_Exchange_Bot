@@ -485,12 +485,23 @@ async def get_trading_config():
     from ..config.settings import get_settings
     settings = get_settings()
     
+    # Handle case where trading config might be None
+    if settings.trading is None:
+        # Return default values
+        return {
+            "min_profit_threshold": 0.001,
+            "max_trade_size_percent": 10.0,
+            "max_slippage_percent": 1.0,
+            "order_timeout_seconds": 30,
+            "paper_trading": settings.bot.paper_trading if settings.bot else False
+        }
+    
     return {
         "min_profit_threshold": settings.trading.min_profit_threshold,
         "max_trade_size_percent": settings.trading.max_trade_size_percent,
         "max_slippage_percent": settings.trading.max_slippage_percent,
         "order_timeout_seconds": settings.trading.order_timeout_seconds,
-        "paper_trading": settings.bot.paper_trading
+        "paper_trading": settings.bot.paper_trading if settings.bot else False
     }
 
 
@@ -589,6 +600,16 @@ async def get_risk_config():
     """Get risk management configuration"""
     from ..config.settings import get_settings
     settings = get_settings()
+    
+    # Handle case where risk config might be None
+    if settings.risk is None:
+        # Return default values
+        return {
+            "max_drawdown_percent": 20.0,
+            "max_daily_loss_percent": 5.0,
+            "max_position_size_usd": 10000.0,
+            "emergency_stop_enabled": True
+        }
     
     return {
         "max_drawdown_percent": settings.risk.max_drawdown_percent,
