@@ -89,9 +89,10 @@ networks:
 
 # ----- TRADING PAIRS -----
 # Format: BASE/QUOTE
-# Binance FDUSD pairs (BTC/FDUSD, ETH/FDUSD) for better liquidity and lower fees
-# GALA/USDT for Gala token trading
+# Binance pairs for same-exchange arbitrage (triangular arbitrage)
+# Core pairs for triangular arbitrage: BTC/USDT, ETH/USDT, ETH/BTC
 trading_pairs:
+  # FDUSD pairs (Binance specific - better liquidity)
   - symbol: BTC/FDUSD
     min_trade_amount: 0.001
     enabled: true
@@ -99,13 +100,81 @@ trading_pairs:
   - symbol: ETH/FDUSD
     min_trade_amount: 0.001
     enabled: true
+  
+  # USDT pairs (most liquid)
+  - symbol: BTC/USDT
+    min_trade_amount: 0.001
+    enabled: true
     
-  - symbol: GALA/USDT
+  - symbol: ETH/USDT
+    min_trade_amount: 0.001
+    enabled: true
+    
+  - symbol: ETH/BTC
+    min_trade_amount: 0.001
+    enabled: true
+    
+  # BNB pairs (Binance native token)
+  - symbol: BNB/USDT
     min_trade_amount: 0.01
+    enabled: true
+    
+  - symbol: BNB/BTC
+    min_trade_amount: 0.01
+    enabled: true
+    
+  - symbol: BNB/ETH
+    min_trade_amount: 0.01
+    enabled: true
+  
+  # Additional popular pairs for more opportunities
+  - symbol: SOL/USDT
+    min_trade_amount: 0.1
+    enabled: true
+    
+  - symbol: ADA/USDT
+    min_trade_amount: 1.0
+    enabled: true
+    
+  - symbol: DOT/USDT
+    min_trade_amount: 0.1
+    enabled: true
+    
+  - symbol: LINK/USDT
+    min_trade_amount: 0.1
     enabled: true
     
   - symbol: MATIC/USDT
     min_trade_amount: 10
+    enabled: true
+    
+  - symbol: AVAX/USDT
+    min_trade_amount: 0.1
+    enabled: true
+    
+  - symbol: XRP/USDT
+    min_trade_amount: 1.0
+    enabled: true
+    
+  - symbol: DOGE/USDT
+    min_trade_amount: 10
+    enabled: true
+    
+  - symbol: LTC/USDT
+    min_trade_amount: 0.01
+    enabled: true
+    
+  - symbol: UNI/USDT
+    min_trade_amount: 0.1
+    enabled: true
+    
+  - symbol: AAVE/USDT
+    min_trade_amount: 0.01
+    enabled: true
+    
+  # Gala token (for Galaswap cross-exchange arbitrage when API is working)
+  - symbol: GALA/USDT
+    min_trade_amount: 0.01
     enabled: true
 
 # ----- REBALANCING -----
