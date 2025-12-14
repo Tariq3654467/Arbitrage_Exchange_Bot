@@ -18,7 +18,13 @@ trading:
   retry_attempts: 3
   auto_discover_pairs: true   # Automatically discover trading pairs from exchanges
   max_discovered_pairs: 50   # Maximum number of pairs to auto-discover (prevents rate limits and file descriptor issues)
-  preferred_quote_currencies: [USDT, FDUSD, BTC, ETH, BUSD, USDC]  # Prioritize pairs with these quote currencies
+  preferred_quote_currencies:  # Prioritize pairs with these quote currencies
+    - USDT
+    - FDUSD
+    - BTC
+    - ETH
+    - BUSD
+    - USDC
   
 # ----- RISK MANAGEMENT -----
 risk:
