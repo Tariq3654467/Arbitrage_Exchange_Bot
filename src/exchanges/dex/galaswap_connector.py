@@ -143,9 +143,13 @@ class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
     
     API_BASE_URL = "https://api-galaswap.gala.com"
-    REQUEST_TIMEOUT = 10  # seconds
-    MAX_RETRIES = 3
+    REQUEST_TIMEOUT = 5  # seconds (reduced from 10 to fail faster)
+    MAX_RETRIES = 2  # Reduced retries to fail faster
     RETRY_DELAY_BASE = 1  # seconds
+    
+    # Circuit breaker: disable after consecutive failures
+    _circuit_breaker_threshold = 5  # Disable after 5 consecutive failures
+    _circuit_breaker_reset_time = 300  # Re-enable after 5 minutes
     
     def __init__(
         self,
@@ -230,6 +234,10 @@ class GalaswapConnector(BaseExchange):
         
         self.public_key = public_key
         self.is_connected = False
+        
+        # Circuit breaker state (instance-level)
+        self._circuit_breaker_failures = 0
+        self._circuit_breaker_last_failure = None
         
         # Token registry for symbol -> token class mapping
         self.token_registry: Dict[str, Dict] = {}
@@ -529,6 +537,45 @@ class GalaswapConnector(BaseExchange):
             raise last_error
         raise Exception("Unexpected error in _make_signed_request")
     
+    def _check_circuit_breaker(self) -> bool:
+        """Check if circuit breaker should allow requests"""
+        # Reset circuit breaker if enough time has passed
+        if self._circuit_breaker_last_failure:
+            time_since_failure = (datetime.now() - self._circuit_breaker_last_failure).total_seconds()
+            if time_since_failure > self._circuit_breaker_reset_time:
+                self._circuit_breaker_failures = 0
+                self._circuit_breaker_last_failure = None
+                logger.info("Galaswap circuit breaker reset - re-enabling API requests")
+                return True
+        
+        # Check if circuit breaker is open
+        if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
+            logger.debug(
+                f"Galaswap circuit breaker OPEN - API disabled due to {self._circuit_breaker_failures} "
+                f"consecutive failures. Will retry after {self._circuit_breaker_reset_time}s"
+            )
+            return False
+        
+        return True
+    
+    def _record_success(self):
+        """Record successful API call - reset circuit breaker"""
+        if self._circuit_breaker_failures > 0:
+            logger.debug(f"Galaswap API recovered - resetting circuit breaker")
+            self._circuit_breaker_failures = 0
+            self._circuit_breaker_last_failure = None
+    
+    def _record_failure(self):
+        """Record failed API call - update circuit breaker"""
+        self._circuit_breaker_failures += 1
+        self._circuit_breaker_last_failure = datetime.now()
+        
+        if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
+            logger.warning(
+                f"Galaswap circuit breaker OPENED after {self._circuit_breaker_failures} failures. "
+                f"API will be disabled for {self._circuit_breaker_reset_time}s to prevent spam."
+            )
+    
     async def _make_unsigned_request(
         self,
         method: str,
@@ -551,6 +598,10 @@ class GalaswapConnector(BaseExchange):
         Raises:
             Exception: If request fails after retries
         """
+        # Check circuit breaker
+        if not self._check_circuit_breaker():
+            raise Exception("Circuit breaker is OPEN - API temporarily disabled due to repeated failures")
+        
         headers = {"Content-Type": "application/json"}
         timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
         
@@ -566,25 +617,39 @@ class GalaswapConnector(BaseExchange):
                     ) as response:
                         if response.status >= 400:
                             error_text = await response.text()
-                            logger.error(f"API error {response.status}: {error_text}")
-                            raise Exception(f"API error {response.status}: {error_text}")
+                            
+                            # Handle 502 Bad Gateway and 503 Service Unavailable as temporary errors
+                            if response.status in [502, 503, 504]:
+                                # These are temporary server errors - record failure but don't spam logs
+                                logger.debug(f"Galaswap API temporary error {response.status}: {error_text[:100]}")
+                                self._record_failure()
+                                raise Exception(f"API error {response.status}: Service temporarily unavailable")
+                            else:
+                                # Other 4xx/5xx errors - log but don't spam
+                                logger.debug(f"Galaswap API error {response.status}: {error_text[:100]}")
+                                self._record_failure()
+                                raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
+                        # Success - reset circuit breaker
+                        self._record_success()
                         return await response.json()
             
             except (ClientConnectorError, asyncio.TimeoutError) as e:
                 last_error = e
+                self._record_failure()
+                
                 if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
                     delay = self.RETRY_DELAY_BASE * (2 ** attempt)
                     # Only log on first attempt to reduce spam
                     if attempt == 0:
                         logger.debug(
-                            f"Connection error to Galaswap API (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}. "
+                            f"Galaswap connection error (attempt {attempt + 1}/{self.MAX_RETRIES}): {type(e).__name__}. "
                             f"Retrying in {delay}s..."
                         )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(
-                        f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: {e}"
+                    logger.debug(
+                        f"Galaswap API connection failed after {self.MAX_RETRIES} attempts: {type(e).__name__}"
                     )
                     raise
             
@@ -607,6 +672,17 @@ class GalaswapConnector(BaseExchange):
         Returns empty order book if API is unreachable to allow bot to continue.
         """
         try:
+            # Check circuit breaker first
+            if not self._check_circuit_breaker():
+                # Circuit breaker is open - return empty order book silently
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
+            
             base_class, quote_class = self._parse_symbol(symbol)
             
             # Fetch available swaps (we want to buy base with quote)
@@ -622,12 +698,8 @@ class GalaswapConnector(BaseExchange):
                 )
             except Exception as api_error:
                 error_msg = str(api_error)
-                # Check if it's an API error response
-                if 'API error' in error_msg:
-                    logger.debug(f"Galaswap API error for {symbol}: {api_error}")
-                else:
-                    logger.debug(f"Galaswap request error for {symbol}: {api_error}")
-                # Return empty order book
+                # Silently return empty order book for all errors to prevent spam
+                # Circuit breaker will handle repeated failures
                 return OrderBook(
                     exchange=self.exchange_name,
                     symbol=symbol,
