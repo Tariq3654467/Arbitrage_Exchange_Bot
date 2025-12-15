@@ -219,6 +219,8 @@ storage:
 # ----- PERFORMANCE -----
 performance:
   max_concurrent_opportunities: 5
-  price_update_interval_ms: 500  # 500ms = 2 requests/second per pair (reduces rate limit issues)
+  # Increase interval to reduce Binance REST API load and avoid 429 rate-limit errors.
+  # 1500ms ≈ 0.66 requests/second per pair, which is much safer than 500ms.
+  price_update_interval_ms: 1500
   order_book_depth: 10
 

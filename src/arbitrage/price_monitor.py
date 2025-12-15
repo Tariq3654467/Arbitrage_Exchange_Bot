@@ -133,12 +133,13 @@ class PriceMonitor:
                         continue
                     # If symbol not in map, monitor on all exchanges (backward compatibility)
                 
-                # Filter Galaswap-specific tokens (GALA, GUSDT, GUSDC, GWETH) to only Galaswap
-                if symbol.startswith(('GALA/', 'GUSDT/', 'GUSDC/', 'GWETH/', 'USDT/GALA', 'USDC/GALA', 'BTC/GALA', 'ETH/GALA', 'FDUSD/GALA', 'BUSD/GALA',
+                # Filter Galaswap-specific tokens (GUSDT, GUSDC, GWETH) to only Galaswap.
+                # NOTE: GALA pairs (e.g. GALA/USDT) are allowed on CEXs as well for cross-exchange arbitrage.
+                if symbol.startswith(('GUSDT/', 'GUSDC/', 'GWETH/',
                                      'USDT/GUSDT', 'USDC/GUSDT', 'BTC/GUSDT', 'ETH/GUSDT', 'FDUSD/GUSDT', 'BUSD/GUSDT',
                                      'USDT/GUSDC', 'USDC/GUSDC', 'BTC/GUSDC', 'ETH/GUSDC', 'FDUSD/GUSDC', 'BUSD/GUSDC',
                                      'USDT/GWETH', 'USDC/GWETH', 'BTC/GWETH', 'ETH/GWETH', 'FDUSD/GWETH', 'BUSD/GWETH')) or \
-                   symbol.endswith(('/GALA', '/GUSDT', '/GUSDC', '/GWETH')) or \
+                   symbol.endswith(('/GUSDT', '/GUSDC', '/GWETH')) or \
                    '/UNKNOWN' in symbol:
                     if exchange_name != 'galaswap':
                         continue  # Skip Galaswap tokens on other exchanges
