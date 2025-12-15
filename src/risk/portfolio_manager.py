@@ -68,7 +68,20 @@ class PortfolioManager:
             self.target_allocation = {k: (v / total * 100) for k, v in target_allocation.items()}
         
         # Price feeds (simplified - in production would use real-time pricing)
+        # If no price feeds are provided, set sensible defaults for major quote assets
+        # so portfolio valuation is not zero when you hold common stablecoins.
         self.price_feeds = price_feeds or {}
+        default_price_feeds = {
+            'USDT': 1.0,
+            'FDUSD': 1.0,
+            'BUSD': 1.0,
+            'USDC': 1.0,
+            # Gala ecosystem stable-like tokens
+            'GUSDT': 1.0,
+            'GUSDC': 1.0,
+        }
+        for asset, price in default_price_feeds.items():
+            self.price_feeds.setdefault(asset, price)
         
         # State tracking
         self.current_balances: Dict[str, AssetBalance] = {}
