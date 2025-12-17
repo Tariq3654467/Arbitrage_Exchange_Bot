@@ -566,19 +566,23 @@ class ArbitrageBot:
                 except Exception as e:
                     logger.error(f"Error writing opportunity to InfluxDB: {e}")
             
-            # Check if trade is allowed
+            # Check if trade is allowed (only hard risk limits: size, drawdown, daily loss)
             allowed, reason = self.risk_manager.check_trade_allowed(analysis, portfolio_value)
             
             if not allowed:
-                logger.info(f"Trade not allowed: {reason}")
+                logger.info(f"Trade not allowed by risk manager: {reason}")
                 return
             
+            # In aggressive mode we execute even if expected net profit is small
+            # or slightly negative. Log this for visibility instead of blocking.
             if not analysis.is_profitable:
-                logger.info(f"Trade not profitable enough: {analysis.net_profit_percent:.2f}%")
-                return
+                logger.info(
+                    f"Executing trade despite low/negative expected profit: "
+                    f"{analysis.net_profit_percent:.4f}% (${analysis.net_profit_usd:.4f})"
+                )
             
             # Execute trade
-            logger.info(f"Executing trade: {analysis.opportunity}")
+            logger.info(f"Executing trade (aggressive mode): {analysis.opportunity}")
             result = await self.trade_executor.execute_trade(analysis)
             
             # Process trade result

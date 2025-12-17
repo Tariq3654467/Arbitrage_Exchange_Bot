@@ -140,11 +140,11 @@ class RiskManager:
         if trade_amount > self.max_position_size_usd:
             return False, f"Trade size exceeds max position: ${trade_amount:.2f} > ${self.max_position_size_usd:.2f}"
         
-        # Check if profitable enough
-        if analysis.net_profit_percent < 0:
-            return False, "Trade is not profitable"
+        # NOTE: We DO NOT block trades based on expected profit here.
+        # Profitability is handled separately; this allows executing even
+        # slightly negative-expected trades for aggressive/testing modes.
         
-        # All checks passed
+        # All risk checks passed
         return True, None
     
     def record_trade(
