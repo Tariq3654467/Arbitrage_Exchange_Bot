@@ -90,3 +90,10 @@ class PortfolioData(BaseModel):
     target_allocation: Dict[str, float]
     rebalance_needed: bool
 
+
+class TestTradeRequest(BaseModel):
+    """Manual test trade request (single execution)"""
+    symbol: str  # e.g. "GALA/USDT"
+    buy_exchange: str  # e.g. "galaswap" or "binance"
+    sell_exchange: str  # e.g. "binance" or "galaswap"
+    trade_amount_usd: float = Field(gt=0, description="Notional USD amount to trade")

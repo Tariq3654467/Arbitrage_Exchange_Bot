@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from ...api.dependencies import verify_credentials
 from ...api import dependencies as deps
 from ...utils.logger import get_logger
+from ...api.models import TestTradeRequest
+from ...arbitrage.price_monitor import ArbitrageOpportunity
 
 logger = get_logger()
 router = APIRouter()
@@ -788,5 +790,135 @@ async def get_system_logs(
         }
     except Exception as e:
         logger.error(f"Error getting logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Manual Test Trade ====================
+
+@router.post("/api/trades/test")
+async def execute_test_trade(
+    request: TestTradeRequest,
+    username: str = Depends(verify_credentials)
+):
+    """
+    Execute a single manual test trade without requiring an arbitrage opportunity.
+
+    This will:
+    - Build a synthetic ArbitrageOpportunity using current prices
+      from the specified buy/sell exchanges.
+    - Run it through the arbitrage calculator and risk manager.
+    - Execute exactly one trade via the TradeExecutor if allowed.
+    """
+    try:
+        from ...api.main import bot
+        from ...arbitrage.price_monitor import PriceData
+
+        if not bot or not bot.is_running:
+            raise HTTPException(status_code=400, detail="Bot is not running")
+
+        # Validate exchanges
+        buy_ex = bot.exchanges.get(request.buy_exchange)
+        sell_ex = bot.exchanges.get(request.sell_exchange)
+        if not buy_ex or not sell_ex:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown exchanges. Available: {list(bot.exchanges.keys())}"
+            )
+
+        symbol = request.symbol
+
+        # Try to get current prices from price monitor first (fast path)
+        buy_price_data = bot.price_monitor.get_current_price(symbol, request.buy_exchange) if bot.price_monitor else None
+        sell_price_data = bot.price_monitor.get_current_price(symbol, request.sell_exchange) if bot.price_monitor else None
+
+        # Fallback: fetch order books directly if needed
+        if not buy_price_data:
+            ob = await buy_ex.get_order_book(symbol, depth=10)
+            if not ob.best_ask:
+                raise HTTPException(status_code=400, detail=f"No ask liquidity for {symbol} on {request.buy_exchange}")
+            buy_price_data = PriceData(
+                exchange=request.buy_exchange,
+                symbol=symbol,
+                bid=ob.best_bid[0] if ob.best_bid else ob.best_ask[0],
+                ask=ob.best_ask[0],
+                mid=(ob.best_bid[0] + ob.best_ask[0]) / 2 if ob.best_bid else ob.best_ask[0],
+                spread=ob.spread or 0,
+                spread_percent=ob.spread_percent or 0,
+                timestamp=ob.timestamp,
+                order_book=ob,
+            )
+
+        if not sell_price_data:
+            ob = await sell_ex.get_order_book(symbol, depth=10)
+            if not ob.best_bid:
+                raise HTTPException(status_code=400, detail=f"No bid liquidity for {symbol} on {request.sell_exchange}")
+            sell_price_data = PriceData(
+                exchange=request.sell_exchange,
+                symbol=symbol,
+                bid=ob.best_bid[0],
+                ask=ob.best_ask[0] if ob.best_ask else ob.best_bid[0],
+                mid=(ob.best_bid[0] + ob.best_ask[0]) / 2 if ob.best_ask else ob.best_bid[0],
+                spread=ob.spread or 0,
+                spread_percent=ob.spread_percent or 0,
+                timestamp=ob.timestamp,
+                order_book=ob,
+            )
+
+        buy_price = buy_price_data.ask
+        sell_price = sell_price_data.bid
+
+        if buy_price <= 0 or sell_price <= 0:
+            raise HTTPException(status_code=400, detail="Invalid prices for test trade")
+
+        gross_profit_percent = ((sell_price - buy_price) / buy_price) * 100
+
+        # Build synthetic opportunity
+        opportunity = ArbitrageOpportunity(
+            symbol=symbol,
+            buy_exchange=request.buy_exchange,
+            sell_exchange=request.sell_exchange,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            gross_profit_percent=gross_profit_percent,
+            timestamp=datetime.now(),
+            buy_order_book=buy_price_data.order_book,
+            sell_order_book=sell_price_data.order_book,
+        )
+
+        # Analyze using existing calculator
+        analysis = await bot.arbitrage_calculator.analyze_opportunity(
+            opportunity,
+            trade_amount_usd=request.trade_amount_usd,
+        )
+
+        # Check risk limits with current portfolio value
+        portfolio_value = await bot.portfolio_manager.get_total_portfolio_value()
+        allowed, reason = bot.risk_manager.check_trade_allowed(analysis, portfolio_value)
+        if not allowed:
+            return {
+                "status": "blocked_by_risk",
+                "reason": reason,
+                "net_profit_percent": analysis.net_profit_percent,
+                "net_profit_usd": analysis.net_profit_usd,
+            }
+
+        # Execute exactly one trade
+        result = await bot.trade_executor.execute_trade(analysis)
+
+        return {
+            "status": result.status.value,
+            "symbol": symbol,
+            "buy_exchange": request.buy_exchange,
+            "sell_exchange": request.sell_exchange,
+            "expected_net_profit_usd": analysis.net_profit_usd,
+            "expected_net_profit_percent": analysis.net_profit_percent,
+            "actual_profit_usd": result.actual_profit_usd,
+            "actual_profit_percent": result.actual_profit_percent,
+            "error_message": result.error_message,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing test trade: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
