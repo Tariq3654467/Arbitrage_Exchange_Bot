@@ -409,18 +409,10 @@ class GalaswapConnector(BaseExchange):
             )
             self.wallet_address_for_api = wallet_address
         
-        # Derive public key from private key if not provided (same as TypeScript)
-        # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true) -> base64
-        # true = compressed format (0x02/0x03 + 32 bytes x coordinate)
-        if not public_key:
-            try:
-                self.public_key = derive_compressed_public_key(private_key_clean)
-                logger.debug("Derived compressed public key from private key")
-            except Exception as e:
-                logger.warning(f"Could not derive public key from private key: {e}. Will try to fetch from API.")
-                self.public_key = None
-        else:
-            self.public_key = public_key
+        # Store provided public key if given, but we'll always try to fetch from API first
+        # The API public key is the authoritative source - it must match what's registered on GalaChain
+        self.public_key = public_key  # May be None - will be fetched from API during connect()
+        self._public_key_derived = False  # Track if we derived it (vs fetched from API)
         
         self.is_connected = False
         
@@ -507,86 +499,83 @@ class GalaswapConnector(BaseExchange):
             logger.debug(f"Could not load token registry from config: {e}")
     
     async def connect(self):
-        """Connect to GalaConnect API and fetch public key if needed"""
+        """Connect to GalaConnect API and fetch public key from API (required for GalaChain)"""
         try:
-            # Fetch public key if not provided
-            if not self.public_key:
-                try:
-                    timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        # Use GalaChain address format for public key lookup
-                        gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
-                        # Format Ethereum addresses with eth| prefix for GalaChain API
-                        if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
-                            gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
-                        async with session.post(
-                            f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
-                            json={"user": gala_address_for_api},
-                            headers={"Content-Type": "application/json"}
-                        ) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                api_public_key = data.get("Data", {}).get("publicKey")
-                                if not api_public_key:
-                                    logger.warning("Public key not found in API response")
-                                else:
-                                    self.public_key = api_public_key
-                                    logger.info(
-                                        f"Fetched public key from API: "
-                                        f"length={len(self.public_key)}, "
-                                        f"preview={self.public_key[:30]}..."
-                                    )
-                            else:
-                                # Try to get error message from response
-                                try:
-                                    error_data = await response.json()
-                                    error_msg = error_data.get("Message", error_data.get("message", "Unknown error"))
-                                except:
-                                    error_msg = await response.text()
-                                
-                                # Only log as debug - this is often normal for new wallets
-                                logger.debug(
-                                    f"Public key not available from API (status {response.status}): {error_msg}. "
-                                    f"This is normal for new wallets or different address formats. "
-                                    f"Will derive public key from private key."
+            # ALWAYS fetch public key from API first - this is the authoritative source
+            # The public key must match what's registered with your GalaChain wallet address
+            try:
+                timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    # Use GalaChain address format for public key lookup
+                    gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
+                    # Format Ethereum addresses with eth| prefix for GalaChain API
+                    if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
+                        gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
+                    
+                    logger.info(f"Fetching public key from GalaChain API for wallet: {gala_address_for_api[:30]}...")
+                    async with session.post(
+                        f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
+                        json={"user": gala_address_for_api},
+                        headers={"Content-Type": "application/json"}
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            api_public_key = data.get("Data", {}).get("publicKey")
+                            if api_public_key:
+                                # Use API public key - this is the one registered with your wallet
+                                self.public_key = api_public_key
+                                self._public_key_derived = False
+                                logger.info(
+                                    f"✓ Fetched public key from GalaChain API: "
+                                    f"length={len(self.public_key)}, "
+                                    f"preview={self.public_key[:30]}..."
                                 )
-                                
-                                # Derive public key from private key as fallback
-                                try:
-                                    private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
-                                    self.public_key = derive_compressed_public_key(private_key_clean)
-                                    logger.info("Derived compressed public key from private key (API public key not available)")
-                                except Exception as derive_error:
-                                    logger.warning(f"Could not derive public key from private key: {derive_error}")
-                                    # Don't set is_connected if we can't get public key
-                                    return
-                except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
-                    # Network errors - API might be temporarily unavailable, derive from private key
-                    logger.debug(
-                        f"Galaswap API temporarily unavailable when fetching public key: {fetch_error}. "
-                        f"Will derive public key from private key."
-                    )
-                    try:
-                        private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
-                        self.public_key = derive_compressed_public_key(private_key_clean)
-                        logger.info("Derived compressed public key from private key (API unavailable)")
-                    except Exception as derive_error:
-                        logger.warning(f"Could not derive public key from private key: {derive_error}")
-                        return
-                except Exception as fetch_error:
-                    error_msg = str(fetch_error)
-                    # Try to derive from private key as fallback
-                    logger.debug(
-                        f"Could not fetch public key from API: {fetch_error}. "
-                        f"Will derive public key from private key."
-                    )
-                    try:
-                        private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
-                        self.public_key = derive_compressed_public_key(private_key_clean)
-                        logger.info("Derived compressed public key from private key (API fetch failed)")
-                    except Exception as derive_error:
-                        logger.warning(f"Could not derive public key from private key: {derive_error}")
-                        return
+                            else:
+                                logger.warning("Public key not found in API response Data field")
+                                # Try alternative response structure
+                                api_public_key = data.get("publicKey") or data.get("PublicKey")
+                                if api_public_key:
+                                    self.public_key = api_public_key
+                                    self._public_key_derived = False
+                                    logger.info(f"✓ Found public key in alternative response field")
+                                else:
+                                    raise Exception("Public key not found in API response")
+                        else:
+                            # Try to get error message from response
+                            try:
+                                error_data = await response.json()
+                                error_msg = error_data.get("Message", error_data.get("message", error_data.get("error", "Unknown error")))
+                            except:
+                                error_msg = await response.text()
+                            
+                            logger.warning(
+                                f"Failed to fetch public key from API (status {response.status}): {error_msg}. "
+                                f"This is CRITICAL - public key must match what's registered on GalaChain."
+                            )
+                            raise Exception(f"API returned status {response.status}: {error_msg}")
+                            
+            except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
+                # Network errors - this is critical, we need the API public key
+                logger.error(
+                    f"❌ CRITICAL: Cannot connect to GalaChain API to fetch public key: {fetch_error}. "
+                    f"Public key MUST be fetched from API to match your registered wallet. "
+                    f"Derived public keys will NOT work for GalaChain API."
+                )
+                raise Exception(
+                    f"Cannot fetch public key from GalaChain API. "
+                    f"This is required - derived public keys do not match registered keys. "
+                    f"Error: {fetch_error}"
+                )
+            except Exception as fetch_error:
+                error_msg = str(fetch_error)
+                logger.error(
+                    f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
+                    f"Public key MUST match what's registered with your wallet address."
+                )
+                raise Exception(
+                    f"Failed to fetch public key from GalaChain API: {error_msg}. "
+                    f"This is required for GalaChain API authentication."
+                )
             
             # Test connection by fetching balances (this will fail gracefully if wallet is empty)
             try:
@@ -748,35 +737,58 @@ class GalaswapConnector(BaseExchange):
         
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
-            if not self.public_key:
-                # Try to fetch public key from API first (most reliable)
-                # This ensures we use the public key registered with GalaSwap
+            # Ensure we have the public key from API (not derived)
+            if not self.public_key or self._public_key_derived:
+                # Reconnect to fetch public key from API if we don't have it or it was derived
                 if not self.is_connected:
+                    await self.connect()
+                elif self._public_key_derived:
+                    # Try to fetch again - derived keys don't work with GalaChain API
+                    logger.warning("Public key was derived, attempting to fetch from API again...")
                     try:
-                        await self.connect()
-                        logger.debug("Connected to GalaSwap API to fetch public key")
-                    except Exception as connect_error:
-                        logger.debug(f"Could not connect to fetch public key: {connect_error}, will derive from private key")
-                
-                # If still no public key, derive from private key (fallback)
-                if not self.public_key:
-                    try:
-                        private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
-                        self.public_key = derive_compressed_public_key(private_key_clean)
-                        logger.info("Derived compressed public key from private key (API public key not available)")
+                        timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            gala_addr = getattr(self, 'wallet_address_for_api', self.wallet_address)
+                            if gala_addr.startswith('0x') and '|' not in gala_addr:
+                                gala_addr = f"eth|{gala_addr[2:]}"
+                            async with session.post(
+                                f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
+                                json={"user": gala_addr},
+                                headers={"Content-Type": "application/json"}
+                            ) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    api_pubkey = data.get("Data", {}).get("publicKey") or data.get("publicKey") or data.get("PublicKey")
+                                    if api_pubkey:
+                                        self.public_key = api_pubkey
+                                        self._public_key_derived = False
+                                        logger.info("✓ Re-fetched public key from API")
                     except Exception as e:
-                        logger.error(f"Failed to derive public key: {e}")
-                        raise Exception(f"Public key required but not available: {e}")
+                        logger.error(f"Failed to re-fetch public key: {e}")
+                        raise Exception(
+                            f"Public key must be fetched from GalaChain API. "
+                            f"Derived public keys do not match registered keys. Error: {e}"
+                        )
             
             if not self.public_key:
-                raise Exception("Public key is required for signed requests but is not available")
+                raise Exception(
+                    "Public key is required for signed requests but is not available. "
+                    "Must be fetched from GalaChain API - derived keys will not work."
+                )
+            
+            if self._public_key_derived:
+                logger.error(
+                    "⚠️  WARNING: Using derived public key - this will likely cause PUBLIC_KEY_MISMATCH errors. "
+                    "Public key must be fetched from GalaChain API."
+                )
             
             body["signerPublicKey"] = self.public_key
             logger.info(
                 f"Using public key for signed request: "
                 f"wallet_address={wallet_address_for_header}, "
                 f"public_key_length={len(self.public_key)}, "
-                f"public_key_preview={self.public_key[:30]}..."
+                f"public_key_preview={self.public_key[:30]}..., "
+                f"source={'API' if not self._public_key_derived else 'DERIVED (WILL FAIL)'}"
             )
         if "uniqueKey" not in body:
             body["uniqueKey"] = self._generate_unique_key()
