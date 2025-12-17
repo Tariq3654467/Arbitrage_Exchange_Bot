@@ -84,10 +84,26 @@ def sign_request_body(body: dict, private_key: str) -> str:
         private_key_obj = keys.PrivateKey(private_key_bytes)
         signature = private_key_obj.sign_msg_hash(hash_bytes)
         
+        # Normalize signature (same as TypeScript version)
+        # If s > n/2, use n - s (this is required for GalaSwap API)
+        # secp256k1 curve order n (constant)
+        # 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        curve_n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        
+        # Normalize s if needed (same logic as TypeScript)
+        r_value = signature.r
+        s_value = signature.s
+        
+        # Check if s > n/2 and normalize (same as TypeScript: signature.s.cmp(ecSecp256k1.curve.n.shrn(1)) > 0)
+        half_n = curve_n // 2
+        if s_value > half_n:
+            s_value = curve_n - s_value
+            logger.debug(f"Normalized signature s value (was > n/2)")
+        
         # Convert to DER format and base64 encode
         # Proper DER encoding for ECDSA signature
-        r_bytes = signature.r.to_bytes(32, 'big')
-        s_bytes = signature.s.to_bytes(32, 'big')
+        r_bytes = r_value.to_bytes(32, 'big')
+        s_bytes = s_value.to_bytes(32, 'big')
         
         # Remove leading zeros
         r_bytes = r_bytes.lstrip(b'\x00')
@@ -218,7 +234,23 @@ class GalaswapConnector(BaseExchange):
                 f"Please ensure the private key is a valid Ethereum-compatible private key."
             ) from e
         
-        self.public_key = public_key
+        # Derive public key from private key if not provided (same as TypeScript)
+        # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true) -> base64
+        if not public_key:
+            try:
+                private_key_obj = keys.PrivateKey(bytes.fromhex(private_key_clean))
+                # Get compressed public key (true = compressed in TypeScript)
+                public_key_obj = private_key_obj.public_key
+                public_key_bytes = public_key_obj.to_bytes(compressed=True)
+                import base64
+                self.public_key = base64.b64encode(public_key_bytes).decode('utf-8')
+                logger.debug("Derived compressed public key from private key")
+            except Exception as e:
+                logger.warning(f"Could not derive public key from private key: {e}. Will try to fetch from API.")
+                self.public_key = None
+        else:
+            self.public_key = public_key
+        
         self.is_connected = False
         
         # Circuit breaker state (instance-level)
@@ -518,14 +550,38 @@ class GalaswapConnector(BaseExchange):
         
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
+            if not self.public_key:
+                # Derive public key from private key if not set (same as TypeScript)
+                # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true)
+                # true = compressed format
+                try:
+                    from eth_keys import keys as eth_keys_lib
+                    private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
+                    private_key_bytes = bytes.fromhex(private_key_clean)
+                    private_key_obj = eth_keys_lib.PrivateKey(private_key_bytes)
+                    
+                    # Get compressed public key (same as TypeScript with true parameter)
+                    public_key = private_key_obj.public_key
+                    # Compressed public key: 0x02 or 0x03 + 32 bytes of x coordinate
+                    public_key_bytes = public_key.to_bytes(compressed=True)
+                    
+                    # Convert to base64 (same as TypeScript)
+                    import base64
+                    self.public_key = base64.b64encode(public_key_bytes).decode('utf-8')
+                    logger.debug("Derived compressed public key from private key")
+                except Exception as e:
+                    logger.error(f"Failed to derive public key: {e}")
+                    raise Exception(f"Public key required but not available: {e}")
             body["signerPublicKey"] = self.public_key
         if "uniqueKey" not in body:
             body["uniqueKey"] = self._generate_unique_key()
         
         # Sign the request
         try:
+            logger.debug(f"Signing request with wallet: {self.wallet_address[:20]}...")
             signature = sign_request_body(body, self.private_key)
             body["signature"] = signature
+            logger.debug("Request signed successfully")
         except Exception as e:
             logger.error(f"Error signing request body: {e}")
             raise Exception(f"Failed to sign request: {e}")
