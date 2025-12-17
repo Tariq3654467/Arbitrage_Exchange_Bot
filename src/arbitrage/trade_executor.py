@@ -119,11 +119,11 @@ class TradeExecutor:
             logger.info(f"Executing arbitrage trade: {analysis.opportunity}")
             
             if self.paper_trading:
-                # Simulate trade
-                result = await self._simulate_trade(analysis)
+                # Simulate trade (mutates existing result instance)
+                result = await self._simulate_trade(analysis, result)
             else:
-                # Execute real trade
-                result = await self._execute_real_trade(analysis)
+                # Execute real trade (mutates existing result instance)
+                result = await self._execute_real_trade(analysis, result)
             
             # Calculate execution time
             execution_time = (datetime.now() - start_time).total_seconds()
@@ -161,8 +161,8 @@ class TradeExecutor:
             
             return result
     
-    async def _simulate_trade(self, analysis: ProfitAnalysis) -> TradeResult:
-        """Simulate a trade for paper trading"""
+    async def _simulate_trade(self, analysis: ProfitAnalysis, result: TradeResult) -> TradeResult:
+        """Simulate a trade for paper trading (mutates provided TradeResult)"""
         logger.info(f"[PAPER TRADE] Simulating trade...")
         
         # Simulate execution delay
@@ -175,13 +175,11 @@ class TradeExecutor:
         actual_profit_usd = analysis.net_profit_usd * (1 + variance / 100)
         actual_profit_percent = analysis.net_profit_percent * (1 + variance / 100)
         
-        result = TradeResult(
-            analysis=analysis,
-            status=TradeStatus.COMPLETED,
-            actual_profit_usd=actual_profit_usd,
-            actual_profit_percent=actual_profit_percent,
-            execution_time=0.5
-        )
+        # Mutate existing result object so references in active_trades stay valid
+        result.status = TradeStatus.COMPLETED
+        result.actual_profit_usd = actual_profit_usd
+        result.actual_profit_percent = actual_profit_percent
+        result.execution_time = 0.5
         
         logger.info(
             f"[PAPER TRADE] Trade simulated: "
@@ -192,14 +190,12 @@ class TradeExecutor:
         
         return result
     
-    async def _execute_real_trade(self, analysis: ProfitAnalysis) -> TradeResult:
-        """Execute a real trade"""
+    async def _execute_real_trade(self, analysis: ProfitAnalysis, result: TradeResult) -> TradeResult:
+        """Execute a real trade (mutates provided TradeResult)"""
         logger.info(f"[LIVE TRADE] Executing real trade...")
         
-        result = TradeResult(
-            analysis=analysis,
-            status=TradeStatus.EXECUTING
-        )
+        # Mark as executing on the existing result instance
+        result.status = TradeStatus.EXECUTING
         
         # Get exchanges
         buy_exchange = self.exchanges.get(analysis.opportunity.buy_exchange)
