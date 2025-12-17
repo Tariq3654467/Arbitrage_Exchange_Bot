@@ -5,9 +5,43 @@ Derives wallet address from private key to ensure they match
 """
 
 import sys
-from eth_account import Account
-from eth_keys import keys
-import base64
+import os
+
+# Add src to path to use project dependencies
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+try:
+    from eth_account import Account
+    from eth_keys import keys
+    import base64
+except ImportError:
+    print("❌ Required packages not installed.")
+    print("\n📦 Installing required packages...")
+    import subprocess
+    try:
+        # Try to install packages
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "eth-account", "eth-keys", "eth-utils"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("✅ Packages installed successfully\n")
+            from eth_account import Account
+            from eth_keys import keys
+            import base64
+        else:
+            raise Exception("Installation failed")
+    except Exception as e:
+        print(f"❌ Failed to install packages automatically: {e}")
+        print("\n📝 Please install manually:")
+        print("  pip3 install eth-account eth-keys eth-utils")
+        print("\nOr if using Docker:")
+        print("  docker compose exec dashboard pip install eth-account eth-keys eth-utils")
+        print("\nOr use the bot's Python environment:")
+        print("  source venv/bin/activate  # if using virtualenv")
+        print("  pip install eth-account eth-keys eth-utils")
+        sys.exit(1)
 
 def derive_wallet_info(private_key: str):
     """Derive wallet address and public key from private key"""

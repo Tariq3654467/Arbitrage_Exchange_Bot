@@ -234,23 +234,34 @@ class GalaswapConnector(BaseExchange):
                 f"Please ensure the private key is a valid Ethereum-compatible private key."
             ) from e
         
-        # Derive Ethereum address from private key for validation
-        derived_ethereum_address = self.account.address.lower()
+        # Derive Ethereum address from private key
+        # GalaSwap API requires the Ethereum address (derived from private key) in X-Wallet-Address header
+        # even if you're using Gala Chain format (client|...)
+        derived_ethereum_address = self.account.address
         
-        # Check if wallet address matches derived address (for Ethereum-style addresses)
-        # Gala wallet addresses can be in format "client|..." which won't match
-        wallet_address_lower = wallet_address.lower()
-        if wallet_address_lower.startswith('0x'):
-            if wallet_address_lower != derived_ethereum_address:
-                logger.warning(
-                    f"⚠️  WARNING: Wallet address '{wallet_address[:20]}...' does not match "
-                    f"private key's derived address '{derived_ethereum_address[:20]}...'. "
-                    f"This may cause signature validation errors. "
-                    f"Please ensure the wallet address matches the private key."
-                )
+        # Store both addresses
+        self.ethereum_address = derived_ethereum_address  # For API header (required)
+        self.gala_address = wallet_address  # Original address (for reference)
+        
+        # For Gala Chain format (client|...), use Ethereum address for API
+        # The API validates signatures against the Ethereum address derived from private key
+        if '|' in wallet_address or not wallet_address.startswith('0x'):
+            logger.info(
+                f"Gala Chain format detected: '{wallet_address[:30]}...'. "
+                f"Will use Ethereum address '{derived_ethereum_address}' for API signature validation."
+            )
+            # Use Ethereum address for API calls (required for signature validation)
+            self.wallet_address_for_api = derived_ethereum_address
+        elif wallet_address.lower() != derived_ethereum_address.lower():
+            logger.warning(
+                f"⚠️  WARNING: Wallet address '{wallet_address[:20]}...' does not match "
+                f"private key's derived address '{derived_ethereum_address[:20]}...'. "
+                f"Using derived address for API calls to avoid signature errors."
+            )
+            self.wallet_address_for_api = derived_ethereum_address
         else:
-            # For Gala-specific formats like "client|...", we can't validate
-            logger.debug(f"Using Gala-specific wallet address format (not Ethereum-style)")
+            # Ethereum address matches - use as-is
+            self.wallet_address_for_api = wallet_address
         
         # Derive public key from private key if not provided (same as TypeScript)
         # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true) -> base64
@@ -361,9 +372,11 @@ class GalaswapConnector(BaseExchange):
                 try:
                     timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
                     async with aiohttp.ClientSession(timeout=timeout) as session:
+                        # Use Ethereum address for API calls (required for signature validation)
+                        wallet_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
                         async with session.post(
                             f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
-                            json={"user": self.wallet_address},
+                            json={"user": wallet_address_for_api},
                             headers={"Content-Type": "application/json"}
                         ) as response:
                             if response.status == 200:
@@ -564,11 +577,12 @@ class GalaswapConnector(BaseExchange):
             headers = {}
         
         headers["Content-Type"] = "application/json"
-        # Use wallet address from configuration
-        # IMPORTANT: This must match the private key used for signing
-        # GalaSwap API validates that the wallet address matches the signature's private key
-        headers["X-Wallet-Address"] = self.wallet_address
-        logger.debug(f"Using wallet address in header: {self.wallet_address[:20]}...")
+        # Use Ethereum address derived from private key for API header
+        # GalaSwap API validates signatures against the Ethereum address, even if using Gala Chain format
+        # This ensures signature validation works correctly
+        wallet_address_for_header = getattr(self, 'wallet_address_for_api', self.wallet_address)
+        headers["X-Wallet-Address"] = wallet_address_for_header
+        logger.debug(f"Using wallet address in header: {wallet_address_for_header[:20]}... (derived from private key)")
         
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
@@ -998,10 +1012,12 @@ class GalaswapConnector(BaseExchange):
     async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Balance]:
         """Get account balance"""
         try:
+            # Use Ethereum address for API calls
+            wallet_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
             response = await self._make_unsigned_request(
                 "POST",
                 "/galachain/api/asset/token-contract/FetchBalances",
-                {"owner": self.wallet_address}
+                {"owner": wallet_address_for_api}
             )
             
             balances = {}
@@ -1435,11 +1451,13 @@ class GalaswapConnector(BaseExchange):
         """Get order status by checking swap status"""
         try:
             # Fetch swaps created by user
+            # Use Ethereum address for API calls
+            wallet_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
             response = await self._make_unsigned_request(
                 "POST",
                 "/galachain/api/asset/token-contract/FetchTokenSwapsOfferedByUser",
                 {
-                    "user": self.wallet_address,
+                    "user": wallet_address_for_api,
                     "limit": 100
                 }
             )
