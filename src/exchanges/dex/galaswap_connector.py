@@ -227,6 +227,9 @@ class GalaswapConnector(BaseExchange):
         # Token registry for symbol -> token class mapping
         self.token_registry: Dict[str, Dict] = {}
         
+        # Load token registry from config file if available
+        self._load_token_registry()
+        
         # Token name mapping for common Gala tokens
         # Maps collection code to actual token name
         self.token_names: Dict[str, str] = {
@@ -253,6 +256,51 @@ class GalaswapConnector(BaseExchange):
         }
         
         logger.info(f"Initialized Galaswap connector for wallet: {wallet_address}")
+    
+    def _load_token_registry(self):
+        """Load token registry from galaswap_tokens.json config file"""
+        try:
+            import os
+            from pathlib import Path
+            
+            # Try to find config file relative to project root
+            config_paths = [
+                Path(__file__).parent.parent.parent.parent / "config" / "galaswap_tokens.json",
+                Path("config") / "galaswap_tokens.json",
+                Path("../config") / "galaswap_tokens.json",
+            ]
+            
+            config_file = None
+            for path in config_paths:
+                if path.exists():
+                    config_file = path
+                    break
+            
+            if config_file:
+                import json
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    
+                # Load token registry
+                registry = config.get("token_registry", {})
+                for symbol, token_info in registry.items():
+                    # Extract token class (collection, category, type, additionalKey)
+                    token_class = {
+                        "collection": token_info.get("collection", symbol),
+                        "category": token_info.get("category", "Unit"),
+                        "type": token_info.get("type", "none"),
+                        "additionalKey": token_info.get("additionalKey", "none")
+                    }
+                    self.token_registry[symbol.upper()] = token_class
+                    
+                    # Also update token names if provided
+                    if "name" in token_info:
+                        self.token_names[symbol.upper()] = token_info["name"]
+                
+                logger.info(f"Loaded {len(self.token_registry)} tokens from {config_file}")
+        except Exception as e:
+            # Don't fail if config file doesn't exist - use defaults
+            logger.debug(f"Could not load token registry from config: {e}")
     
     async def connect(self):
         """Connect to GalaConnect API and fetch public key if needed"""

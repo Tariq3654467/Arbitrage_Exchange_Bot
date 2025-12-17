@@ -1,0 +1,111 @@
+{
+  "token_registry": {
+    "GALA": {
+      "collection": "GALA",
+      "category": "Unit",
+      "type": "none",
+      "additionalKey": "none",
+      "name": "Gala",
+      "decimals": 8
+    },
+    "GUSDC": {
+      "collection": "GUSDC",
+      "category": "Unit",
+      "type": "none",
+      "additionalKey": "none",
+      "name": "Gala USD Coin",
+      "decimals": 6
+    },
+    "GUSDT": {
+      "collection": "GUSDT",
+      "category": "Unit",
+      "type": "none",
+      "additionalKey": "none",
+      "name": "Gala Tether USD",
+      "decimals": 6
+    },
+    "GWETH": {
+      "collection": "GWETH",
+      "category": "Unit",
+      "type": "none",
+      "additionalKey": "none",
+      "name": "Gala Wrapped Ethereum",
+      "decimals": 18
+    }
+  },
+  "common_pairs": [
+    {
+      "symbol": "GALA/GUSDC",
+      "base": "GALA",
+      "quote": "GUSDC",
+      "min_trade_amount": 1.0,
+      "enabled": true
+    },
+    {
+      "symbol": "GUSDC/GALA",
+      "base": "GUSDC",
+      "quote": "GALA",
+      "min_trade_amount": 1.0,
+      "enabled": true
+    },
+    {
+      "symbol": "GALA/GUSDT",
+      "base": "GALA",
+      "quote": "GUSDT",
+      "min_trade_amount": 1.0,
+      "enabled": true
+    },
+    {
+      "symbol": "GUSDT/GALA",
+      "base": "GUSDT",
+      "quote": "GALA",
+      "min_trade_amount": 1.0,
+      "enabled": true
+    }
+  ],
+  "price_limits": [
+    {
+      "token": "GALA",
+      "min_price_usd": 0,
+      "max_price_usd": 100
+    }
+  ],
+  "swap_strategies": {
+    "swap_creator": {
+      "enabled": false,
+      "target_active_swaps": [
+        {
+          "giving_token": "GUSDC",
+          "receiving_token": "GALA",
+          "target_profitability": 1.05,
+          "min_profitability": 1.01,
+          "max_profitability": 1.15,
+          "target_giving_size": 10,
+          "max_price_movement_percent": 0.03,
+          "max_price_movement_window_ms": 1800000
+        }
+      ]
+    },
+    "swap_accepter": {
+      "enabled": false,
+      "trade_limits": [
+        {
+          "giving_token": "GUSDC",
+          "receiving_token": "GALA",
+          "rate": 1.01,
+          "give_limit_per_reset": 10,
+          "reset_interval_ms": 3600000,
+          "max_price_movement_percent": 0.03,
+          "max_price_movement_window_ms": 1800000
+        }
+      ],
+      "minimum_balances": [
+        {
+          "token": "GALA",
+          "minimum_balance": 100
+        }
+      ]
+    }
+  }
+}
+
