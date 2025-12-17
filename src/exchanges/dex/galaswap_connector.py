@@ -524,11 +524,16 @@ class GalaswapConnector(BaseExchange):
                         ) as response:
                             if response.status == 200:
                                 data = await response.json()
-                                self.public_key = data.get("Data", {}).get("publicKey")
-                                if not self.public_key:
+                                api_public_key = data.get("Data", {}).get("publicKey")
+                                if not api_public_key:
                                     logger.warning("Public key not found in API response")
                                 else:
-                                    logger.info("Fetched public key from API")
+                                    self.public_key = api_public_key
+                                    logger.info(
+                                        f"Fetched public key from API: "
+                                        f"length={len(self.public_key)}, "
+                                        f"preview={self.public_key[:30]}..."
+                                    )
                             else:
                                 # Try to get error message from response
                                 try:
@@ -541,35 +546,45 @@ class GalaswapConnector(BaseExchange):
                                 logger.debug(
                                     f"Public key not available from API (status {response.status}): {error_msg}. "
                                     f"This is normal for new wallets or different address formats. "
-                                    f"Will derive public key from private key if needed."
+                                    f"Will derive public key from private key."
                                 )
                                 
-                                # Try to derive public key from private key as fallback
+                                # Derive public key from private key as fallback
                                 try:
-                                    # Get public key from account
-                                    public_key_bytes = self.account.key
-                                    # Convert to hex and then base64 (Gala API might expect base64)
-                                    import base64
-                                    # Get uncompressed public key (65 bytes: 0x04 + 32 bytes x + 32 bytes y)
-                                    public_key_hex = self.account.key.public_key.to_hex()
-                                    # For now, we'll skip this and let it work without public key if needed
-                                    logger.info("Will proceed without public key - it may be required for some operations")
+                                    private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
+                                    self.public_key = derive_compressed_public_key(private_key_clean)
+                                    logger.info("Derived compressed public key from private key (API public key not available)")
                                 except Exception as derive_error:
-                                    logger.debug(f"Could not derive public key: {derive_error}")
+                                    logger.warning(f"Could not derive public key from private key: {derive_error}")
+                                    # Don't set is_connected if we can't get public key
+                                    return
                 except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
-                    # Network errors - API might be temporarily unavailable, use debug level
+                    # Network errors - API might be temporarily unavailable, derive from private key
                     logger.debug(
                         f"Galaswap API temporarily unavailable when fetching public key: {fetch_error}. "
-                        f"Will proceed without it. Public key will be derived from private key if needed."
+                        f"Will derive public key from private key."
                     )
+                    try:
+                        private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
+                        self.public_key = derive_compressed_public_key(private_key_clean)
+                        logger.info("Derived compressed public key from private key (API unavailable)")
+                    except Exception as derive_error:
+                        logger.warning(f"Could not derive public key from private key: {derive_error}")
+                        return
                 except Exception as fetch_error:
                     error_msg = str(fetch_error)
-                    # Only warn if it's not a network issue
-                    if 'network' not in error_msg.lower() and 'connection' not in error_msg.lower():
-                        logger.debug(
-                            f"Could not fetch public key from API: {fetch_error}. "
-                            f"Will proceed without it. Public key will be derived from private key if needed."
-                        )
+                    # Try to derive from private key as fallback
+                    logger.debug(
+                        f"Could not fetch public key from API: {fetch_error}. "
+                        f"Will derive public key from private key."
+                    )
+                    try:
+                        private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
+                        self.public_key = derive_compressed_public_key(private_key_clean)
+                        logger.info("Derived compressed public key from private key (API fetch failed)")
+                    except Exception as derive_error:
+                        logger.warning(f"Could not derive public key from private key: {derive_error}")
+                        return
             
             # Test connection by fetching balances (this will fail gracefully if wallet is empty)
             try:
@@ -730,17 +745,35 @@ class GalaswapConnector(BaseExchange):
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
             if not self.public_key:
-                # Derive public key from private key if not set (same as TypeScript)
-                # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true)
-                # true = compressed format
-                try:
-                    private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
-                    self.public_key = derive_compressed_public_key(private_key_clean)
-                    logger.debug("Derived compressed public key from private key in _make_signed_request")
-                except Exception as e:
-                    logger.error(f"Failed to derive public key: {e}")
-                    raise Exception(f"Public key required but not available: {e}")
+                # Try to fetch public key from API first (most reliable)
+                # This ensures we use the public key registered with GalaSwap
+                if not self.is_connected:
+                    try:
+                        await self.connect()
+                        logger.debug("Connected to GalaSwap API to fetch public key")
+                    except Exception as connect_error:
+                        logger.debug(f"Could not connect to fetch public key: {connect_error}, will derive from private key")
+                
+                # If still no public key, derive from private key (fallback)
+                if not self.public_key:
+                    try:
+                        private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
+                        self.public_key = derive_compressed_public_key(private_key_clean)
+                        logger.info("Derived compressed public key from private key (API public key not available)")
+                    except Exception as e:
+                        logger.error(f"Failed to derive public key: {e}")
+                        raise Exception(f"Public key required but not available: {e}")
+            
+            if not self.public_key:
+                raise Exception("Public key is required for signed requests but is not available")
+            
             body["signerPublicKey"] = self.public_key
+            logger.info(
+                f"Using public key for signed request: "
+                f"wallet_address={wallet_address_for_header}, "
+                f"public_key_length={len(self.public_key)}, "
+                f"public_key_preview={self.public_key[:30]}..."
+            )
         if "uniqueKey" not in body:
             body["uniqueKey"] = self._generate_unique_key()
         
@@ -1298,6 +1331,10 @@ class GalaswapConnector(BaseExchange):
     ) -> Order:
         """Place a market order (executes by accepting available swaps)"""
         try:
+            # Ensure we're connected and have the public key
+            if not self.is_connected or not self.public_key:
+                await self.connect()
+            
             logger.info(f"Placing {side.upper()} market order for {quantity} {symbol} on GalaSwap")
             base_class, quote_class = self._parse_symbol(symbol)
             
