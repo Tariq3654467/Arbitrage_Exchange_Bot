@@ -15,11 +15,158 @@ from eth_account import Account
 from eth_keys import keys
 from eth_utils import keccak, to_checksum_address
 import hashlib
+try:
+    import ecdsa
+    from ecdsa import SigningKey
+    from ecdsa.curves import SECP256k1
+    ECDSA_AVAILABLE = True
+except (ImportError, AttributeError):
+    ECDSA_AVAILABLE = False
 
 from ...exchanges.base_exchange import BaseExchange, OrderBook, Balance, Order
 from ...utils.logger import get_logger
 
 logger = get_logger()
+
+
+def derive_compressed_public_key(private_key: str) -> str:
+    """
+    Derive compressed public key from private key (base64 encoded)
+    Same as TypeScript: ethers.SigningKey.computePublicKey(privateKey, true)
+    
+    Args:
+        private_key: Private key in hex format (with or without 0x prefix)
+    
+    Returns:
+        Base64 encoded compressed public key
+    """
+    # Clean private key
+    private_key_clean = private_key[2:] if private_key.startswith('0x') else private_key
+    private_key_bytes = bytes.fromhex(private_key_clean)
+    
+    # Method 1: Try eth_keys with compressed parameter (newer versions)
+    try:
+        private_key_obj = keys.PrivateKey(private_key_bytes)
+        public_key_obj = private_key_obj.public_key
+        try:
+            public_key_bytes = public_key_obj.to_bytes(compressed=True)
+            return base64.b64encode(public_key_bytes).decode('utf-8')
+        except (TypeError, AttributeError):
+            pass  # Fall through to manual construction
+    except Exception as e:
+        logger.debug(f"eth_keys method failed: {e}, trying alternatives...")
+    
+    # Method 2: Try ecdsa library directly (most reliable, if available)
+    if ECDSA_AVAILABLE:
+        try:
+            signing_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+            verifying_key = signing_key.get_verifying_key()
+            # Get the point coordinates - try different API methods
+            try:
+                # Try direct point access
+                point = verifying_key.pubkey.point
+                x = point.x()
+                y = point.y()
+            except AttributeError:
+                # Try alternative API
+                try:
+                    point = verifying_key.pubkey.point()
+                    x = point.x()
+                    y = point.y()
+                except (AttributeError, TypeError):
+                    # Try getting coordinates from the public key bytes
+                    pubkey_bytes = verifying_key.to_string("compressed")
+                    if len(pubkey_bytes) == 33:
+                        # Already compressed, return it
+                        return base64.b64encode(pubkey_bytes).decode('utf-8')
+                    # Try uncompressed
+                    pubkey_bytes = verifying_key.to_string("uncompressed")
+                    if len(pubkey_bytes) == 65 and pubkey_bytes[0] == 0x04:
+                        x_bytes = pubkey_bytes[1:33]
+                        y_bytes = pubkey_bytes[33:65]
+                        x = int.from_bytes(x_bytes, 'big')
+                        y = int.from_bytes(y_bytes, 'big')
+                    else:
+                        raise ValueError("Could not extract coordinates from ecdsa public key")
+            
+            # Convert x to 32-byte big-endian
+            x_bytes = x.to_bytes(32, 'big')
+            
+            # Determine prefix: 0x02 if y is even, 0x03 if y is odd
+            y_int = int(y)
+            prefix = 0x02 if (y_int % 2 == 0) else 0x03
+            
+            # Construct compressed public key: prefix + x coordinate
+            public_key_bytes = bytes([prefix]) + x_bytes
+            return base64.b64encode(public_key_bytes).decode('utf-8')
+        except Exception as e:
+            logger.debug(f"ecdsa method failed: {e}, trying eth_keys manual method...")
+    
+    # Method 3: Manual construction using eth_keys (fallback)
+    try:
+        private_key_obj = keys.PrivateKey(private_key_bytes)
+        public_key_obj = private_key_obj.public_key
+        
+        # Try different methods to get x, y coordinates
+        x = None
+        y = None
+        
+        # Method 3a: Try to_point() (some versions)
+        try:
+            point = public_key_obj.to_point()
+            x = point.x()
+            y = point.y()
+        except AttributeError:
+            # Method 3b: Try accessing _key attribute (eth_keys internal)
+            try:
+                key_obj = public_key_obj._key
+                x = key_obj.pubkey.point.x()
+                y = key_obj.pubkey.point.y()
+            except AttributeError:
+                # Method 3c: Use to_bytes() and extract from uncompressed format
+                uncompressed = public_key_obj.to_bytes()
+                logger.debug(f"Uncompressed public key length: {len(uncompressed)}, first byte: {hex(uncompressed[0]) if len(uncompressed) > 0 else 'N/A'}")
+                
+                # Handle different formats
+                if len(uncompressed) == 65 and uncompressed[0] == 0x04:
+                    # Standard uncompressed format: 0x04 + 32 bytes x + 32 bytes y
+                    x_bytes = uncompressed[1:33]
+                    y_bytes = uncompressed[33:65]
+                    x = int.from_bytes(x_bytes, 'big')
+                    y = int.from_bytes(y_bytes, 'big')
+                elif len(uncompressed) == 64:
+                    # Some versions return 64 bytes (x + y without prefix)
+                    x_bytes = uncompressed[0:32]
+                    y_bytes = uncompressed[32:64]
+                    x = int.from_bytes(x_bytes, 'big')
+                    y = int.from_bytes(y_bytes, 'big')
+                elif len(uncompressed) == 33:
+                    # Already compressed format
+                    return base64.b64encode(uncompressed).decode('utf-8')
+                else:
+                    raise ValueError(
+                        f"Unexpected public key format: length={len(uncompressed)}, "
+                        f"first_byte={hex(uncompressed[0]) if len(uncompressed) > 0 else 'N/A'}"
+                    )
+        
+        if x is None or y is None:
+            raise ValueError("Could not extract x, y coordinates from public key")
+        
+        # Convert x to 32-byte big-endian
+        x_bytes = x.to_bytes(32, 'big')
+        
+        # Determine prefix: 0x02 if y is even, 0x03 if y is odd
+        y_int = int(y)
+        prefix = 0x02 if (y_int % 2 == 0) else 0x03
+        
+        # Construct compressed public key: prefix + x coordinate
+        public_key_bytes = bytes([prefix]) + x_bytes
+        return base64.b64encode(public_key_bytes).decode('utf-8')
+    
+    except Exception as e:
+        error_msg = f"Failed to derive compressed public key: {e}"
+        logger.error(error_msg)
+        raise ValueError(error_msg) from e
 
 
 def deterministic_json_stringify(obj) -> str:
@@ -268,52 +415,7 @@ class GalaswapConnector(BaseExchange):
         # true = compressed format (0x02/0x03 + 32 bytes x coordinate)
         if not public_key:
             try:
-                private_key_obj = keys.PrivateKey(bytes.fromhex(private_key_clean))
-                public_key_obj = private_key_obj.public_key
-                
-                # Get compressed public key manually (eth_keys version may not support compressed parameter)
-                # Compressed format: 0x02 (if y is even) or 0x03 (if y is odd) + 32 bytes of x coordinate
-                try:
-                    # Try the compressed parameter first (newer versions)
-                    public_key_bytes = public_key_obj.to_bytes(compressed=True)
-                except (TypeError, AttributeError):
-                    # Fallback: manually construct compressed public key
-                    # Get the point coordinates - try different methods based on eth_keys version
-                    try:
-                        # Method 1: Try to_point() (some versions)
-                        point = public_key_obj.to_point()
-                        x = point.x()
-                        y = point.y()
-                    except AttributeError:
-                        # Method 2: Try accessing _key attribute (eth_keys internal)
-                        try:
-                            key_obj = public_key_obj._key
-                            x = key_obj.pubkey.point.x()
-                            y = key_obj.pubkey.point.y()
-                        except AttributeError:
-                            # Method 3: Use to_bytes() and extract from uncompressed format
-                            # Uncompressed: 0x04 + 32 bytes x + 32 bytes y
-                            uncompressed = public_key_obj.to_bytes()
-                            if len(uncompressed) == 65 and uncompressed[0] == 0x04:
-                                x_bytes = uncompressed[1:33]
-                                y_bytes = uncompressed[33:65]
-                                x = int.from_bytes(x_bytes, 'big')
-                                y = int.from_bytes(y_bytes, 'big')
-                            else:
-                                raise ValueError("Unexpected public key format")
-                    
-                    # Convert x to 32-byte big-endian
-                    x_bytes = x.to_bytes(32, 'big')
-                    
-                    # Determine prefix: 0x02 if y is even, 0x03 if y is odd
-                    y_int = int(y)
-                    prefix = 0x02 if (y_int % 2 == 0) else 0x03
-                    
-                    # Construct compressed public key: prefix + x coordinate
-                    public_key_bytes = bytes([prefix]) + x_bytes
-                
-                import base64
-                self.public_key = base64.b64encode(public_key_bytes).decode('utf-8')
+                self.public_key = derive_compressed_public_key(private_key_clean)
                 logger.debug("Derived compressed public key from private key")
             except Exception as e:
                 logger.warning(f"Could not derive public key from private key: {e}. Will try to fetch from API.")
@@ -632,58 +734,9 @@ class GalaswapConnector(BaseExchange):
                 # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true)
                 # true = compressed format
                 try:
-                    from eth_keys import keys as eth_keys_lib
                     private_key_clean = self.private_key[2:] if self.private_key.startswith('0x') else self.private_key
-                    private_key_bytes = bytes.fromhex(private_key_clean)
-                    private_key_obj = eth_keys_lib.PrivateKey(private_key_bytes)
-                    
-                    # Get compressed public key (same as TypeScript with true parameter)
-                    public_key_obj = private_key_obj.public_key
-                    
-                    # Get compressed public key manually (eth_keys version may not support compressed parameter)
-                    try:
-                        # Try the compressed parameter first (newer versions)
-                        public_key_bytes = public_key_obj.to_bytes(compressed=True)
-                    except (TypeError, AttributeError):
-                        # Fallback: manually construct compressed public key
-                        # Get the point coordinates - try different methods based on eth_keys version
-                        try:
-                            # Method 1: Try to_point() (some versions)
-                            point = public_key_obj.to_point()
-                            x = point.x()
-                            y = point.y()
-                        except AttributeError:
-                            # Method 2: Try accessing _key attribute (eth_keys internal)
-                            try:
-                                key_obj = public_key_obj._key
-                                x = key_obj.pubkey.point.x()
-                                y = key_obj.pubkey.point.y()
-                            except AttributeError:
-                                # Method 3: Use to_bytes() and extract from uncompressed format
-                                # Uncompressed: 0x04 + 32 bytes x + 32 bytes y
-                                uncompressed = public_key_obj.to_bytes()
-                                if len(uncompressed) == 65 and uncompressed[0] == 0x04:
-                                    x_bytes = uncompressed[1:33]
-                                    y_bytes = uncompressed[33:65]
-                                    x = int.from_bytes(x_bytes, 'big')
-                                    y = int.from_bytes(y_bytes, 'big')
-                                else:
-                                    raise ValueError("Unexpected public key format")
-                        
-                        # Convert x to 32-byte big-endian
-                        x_bytes = x.to_bytes(32, 'big')
-                        
-                        # Determine prefix: 0x02 if y is even, 0x03 if y is odd
-                        y_int = int(y)
-                        prefix = 0x02 if (y_int % 2 == 0) else 0x03
-                        
-                        # Construct compressed public key: prefix + x coordinate
-                        public_key_bytes = bytes([prefix]) + x_bytes
-                    
-                    # Convert to base64 (same as TypeScript)
-                    import base64
-                    self.public_key = base64.b64encode(public_key_bytes).decode('utf-8')
-                    logger.debug("Derived compressed public key from private key")
+                    self.public_key = derive_compressed_public_key(private_key_clean)
+                    logger.debug("Derived compressed public key from private key in _make_signed_request")
                 except Exception as e:
                     logger.error(f"Failed to derive public key: {e}")
                     raise Exception(f"Public key required but not available: {e}")
