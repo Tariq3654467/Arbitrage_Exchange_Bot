@@ -128,13 +128,14 @@ class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
     
     API_BASE_URL = "https://api-galaswap.gala.com"
-    REQUEST_TIMEOUT = 5  # seconds (reduced from 10 to fail faster)
-    MAX_RETRIES = 2  # Reduced retries to fail faster
-    RETRY_DELAY_BASE = 1  # seconds
+    REQUEST_TIMEOUT = 10  # seconds (increased for signed requests)
+    SIGNED_REQUEST_TIMEOUT = 30  # seconds (longer timeout for order execution)
+    MAX_RETRIES = 3  # Increased retries for better reliability
+    RETRY_DELAY_BASE = 2  # seconds (increased delay between retries)
     
     # Circuit breaker: disable after consecutive failures
-    _circuit_breaker_threshold = 5  # Disable after 5 consecutive failures
-    _circuit_breaker_reset_time = 300  # Re-enable after 5 minutes
+    _circuit_breaker_threshold = 10  # Disable after 10 consecutive failures (less aggressive)
+    _circuit_breaker_reset_time = 180  # Re-enable after 3 minutes (faster recovery)
     
     def __init__(
         self,
@@ -522,14 +523,21 @@ class GalaswapConnector(BaseExchange):
             body["uniqueKey"] = self._generate_unique_key()
         
         # Sign the request
-        signature = sign_request_body(body, self.private_key)
-        body["signature"] = signature
+        try:
+            signature = sign_request_body(body, self.private_key)
+            body["signature"] = signature
+        except Exception as e:
+            logger.error(f"Error signing request body: {e}")
+            raise Exception(f"Failed to sign request: {e}")
         
-        timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+        # Use longer timeout for signed requests (order execution)
+        timeout = ClientTimeout(total=self.SIGNED_REQUEST_TIMEOUT)
         last_error = None
         
         for attempt in range(self.MAX_RETRIES if retry_on_connection_error else 1):
             try:
+                logger.debug(f"Making signed request to {endpoint} (attempt {attempt + 1}/{self.MAX_RETRIES})")
+                
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.request(
                         method,
@@ -539,30 +547,42 @@ class GalaswapConnector(BaseExchange):
                     ) as response:
                         if response.status >= 400:
                             error_text = await response.text()
-                            logger.error(f"API error {response.status}: {error_text}")
-                            raise Exception(f"API error {response.status}: {error_text}")
+                            logger.error(f"API error {response.status} for {endpoint}: {error_text[:200]}")
+                            
+                            # Don't retry on 4xx errors (client errors)
+                            if 400 <= response.status < 500:
+                                raise Exception(f"API error {response.status}: {error_text[:200]}")
+                            
+                            # Retry on 5xx errors (server errors)
+                            raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
-                        return await response.json()
+                        result = await response.json()
+                        logger.debug(f"Signed request to {endpoint} succeeded")
+                        return result
             
             except (ClientConnectorError, asyncio.TimeoutError) as e:
                 last_error = e
                 if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
                     delay = self.RETRY_DELAY_BASE * (2 ** attempt)
-                    # Only log on first attempt to reduce spam
-                    if attempt == 0:
-                        logger.debug(
-                            f"Connection error to Galaswap API (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}. "
-                            f"Retrying in {delay}s..."
-                        )
+                    logger.warning(
+                        f"Connection/timeout error to Galaswap API {endpoint} "
+                        f"(attempt {attempt + 1}/{self.MAX_RETRIES}): {type(e).__name__}. "
+                        f"Retrying in {delay}s..."
+                    )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(
-                        f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: {e}"
-                    )
-                    raise
+                    error_msg = f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: {type(e).__name__}: {e}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg) from e
             
             except Exception as e:
-                # For non-connection errors, don't retry
+                # For non-connection errors, don't retry unless it's a 5xx error
+                error_msg = str(e)
+                if "API error 5" in error_msg and attempt < (self.MAX_RETRIES - 1):
+                    delay = self.RETRY_DELAY_BASE * (2 ** attempt)
+                    logger.warning(f"Server error, retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
                 raise
         
         # Should never reach here, but just in case
@@ -1052,22 +1072,31 @@ class GalaswapConnector(BaseExchange):
     ) -> Order:
         """Place a market order (executes by accepting available swaps)"""
         try:
+            logger.info(f"Placing {side.upper()} market order for {quantity} {symbol} on GalaSwap")
             base_class, quote_class = self._parse_symbol(symbol)
             
             if side.lower() == 'buy':
                 # Buy base with quote - find swaps offering base for quote
-                response = await self._make_unsigned_request(
-                    "POST",
-                    "/v1/FetchAvailableTokenSwaps",
-                    {
-                        "offeredTokenClass": base_class,   # They offer base
-                        "wantedTokenClass": quote_class     # They want quote
-                    }
-                )
+                logger.debug(f"Fetching available swaps: offering {base_class['collection']}, wanting {quote_class['collection']}")
+                
+                try:
+                    response = await self._make_unsigned_request(
+                        "POST",
+                        "/v1/FetchAvailableTokenSwaps",
+                        {
+                            "offeredTokenClass": base_class,   # They offer base
+                            "wantedTokenClass": quote_class     # They want quote
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to fetch available swaps: {e}")
+                    raise ValueError(f"Failed to fetch swaps for {symbol}: {e}")
                 
                 swaps = response.get("results", [])
                 if not swaps:
                     raise ValueError(f"No available swaps to buy {symbol}")
+                
+                logger.debug(f"Found {len(swaps)} available swaps")
                 
                 # Find best swap (lowest price)
                 best_swap = None
@@ -1090,11 +1119,18 @@ class GalaswapConnector(BaseExchange):
                 if not best_swap:
                     raise ValueError(f"No suitable swap found for {symbol}")
                 
+                logger.info(f"Selected best swap: price {best_price:.6f}, swap ID: {best_swap.get('swapRequestId', 'N/A')[:20]}...")
+                
                 # Calculate how many uses we need
                 base_per_use = float(best_swap["offered"][0]["quantity"])
                 uses_needed = max(1, int(quantity / base_per_use))
                 uses_available = int(best_swap.get("uses", 1)) - int(best_swap.get("usesSpent", 0))
                 uses = min(uses_needed, uses_available)
+                
+                if uses <= 0:
+                    raise ValueError(f"No uses available for swap {best_swap.get('swapRequestId', 'N/A')}")
+                
+                logger.info(f"Accepting swap: {uses} uses, expecting {base_per_use * uses} {base_class['collection']}")
                 
                 # Accept the swap
                 swap_request_id = best_swap["swapRequestId"]
@@ -1112,7 +1148,9 @@ class GalaswapConnector(BaseExchange):
                     }]
                 }
                 
+                logger.debug(f"Executing signed request to accept swap...")
                 result = await self._make_signed_request("POST", "/v1/BatchFillTokenSwap", body)
+                logger.info(f"Swap acceptance request completed")
                 
                 # Extract transaction info
                 tx_data = result.get("Data", [{}])[0] if result.get("Data") else {}
@@ -1135,9 +1173,27 @@ class GalaswapConnector(BaseExchange):
             
             else:  # sell
                 # Sell base for quote - create a swap offering base for quote
+                logger.debug(f"Creating swap to sell {quantity} {base_class['collection']} for {quote_class['collection']}")
+                
                 # Calculate quote amount we want
-                ticker = await self.get_ticker(symbol)
-                quote_amount = quantity * ticker['bid']  # Use bid price
+                try:
+                    ticker = await self.get_ticker(symbol)
+                    if not ticker or ticker.get('bid', 0) <= 0:
+                        # Fallback: use a reasonable estimate or fetch from order book
+                        logger.warning(f"Ticker bid price not available, using order book")
+                        order_book = await self.get_order_book(symbol, depth=1)
+                        if order_book.best_bid:
+                            bid_price = order_book.best_bid[0]
+                        else:
+                            raise ValueError(f"Cannot determine price for {symbol}")
+                    else:
+                        bid_price = ticker['bid']
+                    
+                    quote_amount = quantity * bid_price  # Use bid price
+                    logger.debug(f"Calculated quote amount: {quote_amount:.6f} {quote_class['collection']} for {quantity} {base_class['collection']}")
+                except Exception as e:
+                    logger.error(f"Error getting price for swap creation: {e}")
+                    raise ValueError(f"Failed to get price for {symbol}: {e}")
                 
                 # Create swap
                 body = {
@@ -1158,7 +1214,10 @@ class GalaswapConnector(BaseExchange):
                     "uses": "1"
                 }
                 
+                logger.info(f"Creating swap: offering {quantity} {base_class['collection']}, wanting {quote_amount:.6f} {quote_class['collection']}")
+                logger.debug(f"Executing signed request to create swap...")
                 result = await self._make_signed_request("POST", "/v1/RequestTokenSwap", body)
+                logger.info(f"Swap creation request completed")
                 
                 swap_data = result.get("Data", {})
                 swap_request_id = swap_data.get("swapRequestId", "")
