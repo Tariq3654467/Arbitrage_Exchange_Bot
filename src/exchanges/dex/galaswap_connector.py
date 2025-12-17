@@ -84,21 +84,6 @@ def sign_request_body(body: dict, private_key: str) -> str:
         private_key_obj = keys.PrivateKey(private_key_bytes)
         signature = private_key_obj.sign_msg_hash(hash_bytes)
         
-        # Normalize signature (s must be <= n/2)
-        from eth_keys.datatypes import Signature
-        from eth_keys import keys as eth_keys_module
-        
-        ec = eth_keys_module.ecdsa
-        curve_n = ec.secp256k1.curve.n
-        
-        # Check if s > n/2
-        if signature.s > curve_n // 2:
-            # Normalize: s = n - s
-            new_s = curve_n - signature.s
-            # Flip recovery param
-            new_v = 1 - signature.v if signature.v in (0, 1) else signature.v
-            signature = Signature(signature.r, new_s, new_v)
-        
         # Convert to DER format and base64 encode
         # Proper DER encoding for ECDSA signature
         r_bytes = signature.r.to_bytes(32, 'big')
