@@ -234,6 +234,24 @@ class GalaswapConnector(BaseExchange):
                 f"Please ensure the private key is a valid Ethereum-compatible private key."
             ) from e
         
+        # Derive Ethereum address from private key for validation
+        derived_ethereum_address = self.account.address.lower()
+        
+        # Check if wallet address matches derived address (for Ethereum-style addresses)
+        # Gala wallet addresses can be in format "client|..." which won't match
+        wallet_address_lower = wallet_address.lower()
+        if wallet_address_lower.startswith('0x'):
+            if wallet_address_lower != derived_ethereum_address:
+                logger.warning(
+                    f"⚠️  WARNING: Wallet address '{wallet_address[:20]}...' does not match "
+                    f"private key's derived address '{derived_ethereum_address[:20]}...'. "
+                    f"This may cause signature validation errors. "
+                    f"Please ensure the wallet address matches the private key."
+                )
+        else:
+            # For Gala-specific formats like "client|...", we can't validate
+            logger.debug(f"Using Gala-specific wallet address format (not Ethereum-style)")
+        
         # Derive public key from private key if not provided (same as TypeScript)
         # TypeScript: ethers.SigningKey.computePublicKey(privateKey, true) -> base64
         if not public_key:
@@ -546,7 +564,11 @@ class GalaswapConnector(BaseExchange):
             headers = {}
         
         headers["Content-Type"] = "application/json"
+        # Use wallet address from configuration
+        # IMPORTANT: This must match the private key used for signing
+        # GalaSwap API validates that the wallet address matches the signature's private key
         headers["X-Wallet-Address"] = self.wallet_address
+        logger.debug(f"Using wallet address in header: {self.wallet_address[:20]}...")
         
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
