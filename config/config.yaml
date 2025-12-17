@@ -183,6 +183,23 @@ trading_pairs:
     min_trade_amount: 0.01
     enabled: true
 
+  # Common Gala Chain pairs for Galaswap
+  - symbol: GALA/GUSDT
+    min_trade_amount: 1.0
+    enabled: true
+
+  - symbol: GUSDT/GALA
+    min_trade_amount: 1.0
+    enabled: true
+
+  - symbol: GALA/GUSDC
+    min_trade_amount: 1.0
+    enabled: true
+
+  - symbol: GUSDC/GALA
+    min_trade_amount: 1.0
+    enabled: true
+
 # ----- REBALANCING -----
 rebalancing:
   enabled: true
