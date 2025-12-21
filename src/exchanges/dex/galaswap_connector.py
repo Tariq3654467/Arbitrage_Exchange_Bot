@@ -7,6 +7,7 @@ import json
 import uuid
 import base64
 import asyncio
+import os
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 import aiohttp
@@ -310,9 +311,11 @@ class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
     
     # API Base URL - can be overridden via environment variable GALASWAP_API_BASE_URL
-    # Default: https://api-galaswap.gala.com (backend API)
+    # Updated to new backend URL: https://dex-backend-prod1.defi.gala.com/
+    # Previous URL: https://api-galaswap.gala.com (may still work but new URL is preferred)
     # Note: https://swap.gala.com/ is the frontend website, not the API endpoint
-    API_BASE_URL = "https://api-galaswap.gala.com"
+    # Check environment variable first, then use default
+    API_BASE_URL = os.getenv("GALASWAP_API_BASE_URL", "https://dex-backend-prod1.defi.gala.com")
     REQUEST_TIMEOUT = 10  # seconds (increased for signed requests)
     SIGNED_REQUEST_TIMEOUT = 30  # seconds (longer timeout for order execution)
     MAX_RETRIES = 3  # Increased retries for better reliability
