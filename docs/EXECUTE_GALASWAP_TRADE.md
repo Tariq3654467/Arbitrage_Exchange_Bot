@@ -63,8 +63,8 @@ curl -X POST http://localhost:8000/api/trades/test \
   -d '{
     "symbol": "GALA/USDT",
     "buy_exchange": "binance",
-    "sell_exchange": "galaswap",
-    "trade_amount_usd": .0
+    "sell_exchange": "binance",
+    "trade_amount_usd": 5.0
   }'
 ```
 
@@ -197,7 +197,12 @@ curl http://localhost:8000/api/portfolio/balances
 
 ### 4. Minimum Trade Amounts
 - GalaSwap: Very small minimums (can trade fractions)
-- Binance: Depends on pair (usually 0.001 BTC equivalent)
+- Binance: **Minimum notional value** (price × quantity) required per pair:
+  - GALA/USDT: **$5-10 USD minimum** (varies by market conditions)
+  - Most USDT pairs: $5-10 USD minimum
+  - BTC/USDT, ETH/USDT: Higher minimums (usually $10-20 USD)
+  
+**Important**: The `trade_amount_usd` must meet the minimum notional requirement. If you get a "NOTIONAL" error, increase the trade amount.
 
 ### 5. GalaSwap Specific Notes
 - GalaSwap uses swaps (peer-to-peer)
@@ -239,6 +244,38 @@ curl http://localhost:8000/api/config/exchanges
 - Exceeds maximum trade size
 - Daily loss limit reached
 - Check risk settings in dashboard
+
+### "Filter failure: NOTIONAL" (Binance Error -1013)
+
+**Problem**: The trade amount is below Binance's minimum notional value for the trading pair.
+
+**What is NOTIONAL?**
+- Notional = Price × Quantity (total order value in USD)
+- Binance requires a minimum notional value per trading pair
+- For GALA/USDT: typically **$5-10 USD minimum**
+
+**Solutions**:
+1. **Increase the trade amount** to at least $10-15 USD:
+   ```bash
+   curl -X POST http://localhost:8000/api/trades/test \
+     -u admin:admin \
+     -H "Content-Type: application/json" \
+     -d '{
+       "symbol": "GALA/USDT",
+       "buy_exchange": "binance",
+       "sell_exchange": "binance",
+       "trade_amount_usd": 15.0
+     }'
+   ```
+
+2. **Check Binance's current minimum notional**:
+   - Visit Binance exchange info page
+   - Or use Binance API: `GET /api/v3/exchangeInfo` and check `filters` for `MIN_NOTIONAL`
+
+3. **Recommended minimum trade amounts**:
+   - GALA/USDT: **$10-15 USD**
+   - BTC/USDT, ETH/USDT: **$20-50 USD**
+   - Other altcoins: **$10-20 USD**
 
 ### "Failed to execute"
 - Check exchange connection
