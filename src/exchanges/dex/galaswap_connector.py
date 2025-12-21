@@ -287,6 +287,25 @@ def sign_request_body(body: dict, private_key: str) -> str:
         raise
 
 
+def format_quantity(quantity: float, decimals: int = 8) -> str:
+    """
+    Format quantity to string with specified decimal places.
+    GalaSwap API requires quantities to have at most 8 decimal places.
+    
+    Args:
+        quantity: Quantity value
+        decimals: Maximum decimal places (default 8 for GalaSwap)
+    
+    Returns:
+        Formatted quantity string
+    """
+    # Round to specified decimal places and remove trailing zeros
+    rounded = round(quantity, decimals)
+    # Format to avoid scientific notation and remove trailing zeros
+    formatted = f"{rounded:.{decimals}f}".rstrip('0').rstrip('.')
+    return formatted
+
+
 class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
     
@@ -1478,16 +1497,17 @@ class GalaswapConnector(BaseExchange):
                     raise ValueError(f"Failed to get price for {symbol}: {e}")
                 
                 # Create swap
+                # Round quantities to 8 decimal places (GalaSwap API requirement)
                 body = {
                     "offered": [{
-                        "quantity": str(quantity),
+                        "quantity": format_quantity(quantity, decimals=8),
                         "tokenInstance": {
                             **base_class,
                             "instance": "0"
                         }
                     }],
                     "wanted": [{
-                        "quantity": str(quote_amount),
+                        "quantity": format_quantity(quote_amount, decimals=8),
                         "tokenInstance": {
                             **quote_class,
                             "instance": "0"
@@ -1579,16 +1599,17 @@ class GalaswapConnector(BaseExchange):
                 # Create swap at limit price
                 quote_amount = quantity * price
                 
+                # Round quantities to 8 decimal places (GalaSwap API requirement)
                 body = {
                     "offered": [{
-                        "quantity": str(quantity),
+                        "quantity": format_quantity(quantity, decimals=8),
                         "tokenInstance": {
                             **base_class,
                             "instance": "0"
                         }
                     }],
                     "wanted": [{
-                        "quantity": str(quote_amount),
+                        "quantity": format_quantity(quote_amount, decimals=8),
                         "tokenInstance": {
                             **quote_class,
                             "instance": "0"

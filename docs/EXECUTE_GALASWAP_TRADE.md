@@ -277,6 +277,47 @@ curl http://localhost:8000/api/config/exchanges
    - BTC/USDT, ETH/USDT: **$20-50 USD**
    - Other altcoins: **$10-20 USD**
 
+### "Signature is invalid. DTO should be signed by [address] private key" (GalaSwap Error 401)
+
+**Problem**: The wallet address in your configuration doesn't match the private key being used to sign requests.
+
+**What this means**:
+- GalaSwap API verifies that the signature was created with the private key corresponding to the wallet address in the `X-Wallet-Address` header
+- The error message shows which address the API expects: `a7027114A40d21382951b03e3067429106e6e806` (example)
+
+**Solutions**:
+1. **Verify wallet address matches private key**:
+   ```bash
+   # Use the verification script
+   python verify_gala_credentials.py <your_private_key> <your_wallet_address>
+   ```
+
+2. **Check your GalaSwap configuration**:
+   - Dashboard → Exchanges → GalaSwap
+   - Verify the wallet address matches the private key
+   - Wallet address format: `eth|...` or `client|...` (GalaChain format)
+   - For Ethereum addresses: `eth|` + address without `0x` prefix
+
+3. **Re-configure GalaSwap credentials**:
+   - Get your wallet address from your private key
+   - Update the wallet address in the dashboard to match
+   - Ensure private key is correct (64 hex characters)
+
+4. **Common issues**:
+   - Using wrong wallet address (different from private key)
+   - Wallet address format incorrect (missing `eth|` or `client|` prefix)
+   - Private key doesn't match the wallet address
+
+**Note**: The wallet address must be derived from the private key. You cannot use a random address with a different private key.
+
+### "LockToken failed: Quantity has more than 8 decimal places" (GalaSwap Error 500)
+
+**Problem**: The quantity being sent to GalaSwap API has more than 8 decimal places.
+
+**Solution**: This has been fixed in the code. Quantities are now automatically rounded to 8 decimal places. If you still see this error:
+- Restart the bot to load the updated code
+- Check that you're using the latest version
+
 ### "Failed to execute"
 - Check exchange connection
 - Verify balances
