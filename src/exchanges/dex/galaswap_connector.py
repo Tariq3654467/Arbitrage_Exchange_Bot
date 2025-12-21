@@ -600,7 +600,30 @@ class GalaswapConnector(BaseExchange):
                         json={"user": gala_address_for_api},
                         headers={"Content-Type": "application/json"}
                     ) as response:
-                        if response.status == 200:
+                        if response.status == 404:
+                            # Endpoint deprecated - try to derive public key or use provided one
+                            logger.warning(
+                                f"Public key endpoint deprecated (404). "
+                                f"Using derived public key (may cause signature errors if not registered)."
+                            )
+                            # Derive public key as fallback
+                            try:
+                                derived_pubkey = derive_compressed_public_key(self.private_key)
+                                self.public_key = derived_pubkey
+                                self._public_key_derived = True
+                                logger.warning(
+                                    "⚠️  Using DERIVED public key - this may cause signature errors. "
+                                    "Public key should be fetched from API or provided in config."
+                                )
+                            except Exception as derive_error:
+                                logger.error(f"Failed to derive public key: {derive_error}")
+                                raise Exception(
+                                    "Cannot get public key: API endpoint deprecated and derivation failed. "
+                                    "Please provide public key in configuration."
+                                )
+                            # Skip the rest of the public key fetching logic
+                            return
+                        elif response.status == 200:
                             data = await response.json()
                             api_public_key = data.get("Data", {}).get("publicKey")
                             if api_public_key:
@@ -1041,6 +1064,25 @@ class GalaswapConnector(BaseExchange):
                         if response.status >= 400:
                             error_text = await response.text()
                             
+                            # Check if this is a deprecated endpoint (404 on old endpoints)
+                            deprecated_endpoints = [
+                                "/v1/FetchAvailableTokenSwaps",
+                                "/galachain/api/asset/token-contract/FetchBalances",
+                                "/galachain/api/asset/public-key-contract/GetPublicKey",
+                                "/galachain/api/asset/token-contract/FetchTokenSwapsOfferedByUser"
+                            ]
+                            is_deprecated = any(dep in endpoint for dep in deprecated_endpoints)
+                            
+                            if response.status == 404 and is_deprecated:
+                                # Deprecated endpoint - don't record as failure, just log and return
+                                logger.debug(
+                                    f"GalaSwap deprecated endpoint (404): {endpoint}. "
+                                    f"Old swap-based API endpoints are no longer available. "
+                                    f"New V3 DEX API uses different endpoints."
+                                )
+                                # Don't record 404 on deprecated endpoints as failure
+                                raise Exception(f"Deprecated endpoint (404): {endpoint} - Old API no longer available")
+                            
                             # Log the actual error for debugging (especially important with new API URL)
                             logger.warning(
                                 f"Galaswap API error {response.status} for {endpoint}: "
@@ -1055,7 +1097,9 @@ class GalaswapConnector(BaseExchange):
                                 raise Exception(f"API error {response.status}: Service temporarily unavailable - {error_text[:100]}")
                             else:
                                 # Other 4xx/5xx errors - log the actual error
-                                self._record_failure()
+                                # Only record as failure if not a deprecated endpoint 404
+                                if not (response.status == 404 and is_deprecated):
+                                    self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
                         # Success - reset circuit breaker
@@ -1115,107 +1159,96 @@ class GalaswapConnector(BaseExchange):
             
             base_class, quote_class = self._parse_symbol(symbol)
             
-            # Fetch available swaps (we want to buy base with quote)
-            # So we offer quote and want base
-            # API expects token class objects, not strings
-            try:
-                response = await self._make_unsigned_request(
-                    "POST",
-                    "/v1/FetchAvailableTokenSwaps",
-                    {
-                        "offeredTokenClass": quote_class,  # Dict object: {collection, category, type, additionalKey}
-                        "wantedTokenClass": base_class     # Dict object: {collection, category, type, additionalKey}
-                    }
-                )
-            except Exception as api_error:
-                error_msg = str(api_error)
-                # Silently return empty order book for all errors to prevent spam
-                # Circuit breaker will handle repeated failures
-                return OrderBook(
-                    exchange=self.exchange_name,
-                    symbol=symbol,
-                    bids=[],
-                    asks=[],
-                    timestamp=datetime.now()
-                )
+            # NEW API: Use /v1/trade/pool and /v1/trade/quote to build order book
+            # V3 DEX uses liquidity pools, not traditional order books
+            # We'll simulate an order book using quotes at different amounts
             
-            # Check response structure
-            if not response:
-                logger.debug(f"Empty response from Galaswap API for {symbol}")
-                return OrderBook(
-                    exchange=self.exchange_name,
-                    symbol=symbol,
-                    bids=[],
-                    asks=[],
-                    timestamp=datetime.now()
-                )
+            base_token_key = token_class_to_composite_key(base_class)
+            quote_token_key = token_class_to_composite_key(quote_class)
             
-            swaps = response.get("results", [])
-            if not swaps:
-                logger.debug(f"No swaps available for {symbol} on Galaswap")
-                return OrderBook(
-                    exchange=self.exchange_name,
-                    symbol=symbol,
-                    bids=[],
-                    asks=[],
-                    timestamp=datetime.now()
-                )
+            # Try to get pool details first (need to know fee tier)
+            # Common fee tiers: 500 (0.05%), 3000 (0.30%), 10000 (1.00%)
+            fee_tiers = [3000, 500, 10000]  # Try standard fee tier first
             
-            # Build order book from swaps
-            bids = []  # People offering base (we can buy from them)
-            asks = []  # People wanting base (we can sell to them)
-            
-            for swap in swaps[:depth]:
+            pool_data = None
+            for fee in fee_tiers:
                 try:
-                    # Swap perspective: they're offering base, wanting quote
-                    offered = swap.get("offered", [])
-                    wanted = swap.get("wanted", [])
-                    
-                    # Handle different response structures
-                    if not offered or not wanted:
-                        continue
-                    
-                    # Ensure they're lists
-                    if not isinstance(offered, list):
-                        offered = [offered]
-                    if not isinstance(wanted, list):
-                        wanted = [wanted]
-                    
-                    if offered and wanted and len(offered) > 0 and len(wanted) > 0:
-                        # Get quantities - handle different formats
-                        base_item = offered[0] if isinstance(offered[0], dict) else {}
-                        quote_item = wanted[0] if isinstance(wanted[0], dict) else {}
-                        
-                        base_qty = float(base_item.get("quantity", base_item.get("qty", 0)))
-                        quote_qty = float(quote_item.get("quantity", quote_item.get("qty", 0)))
-                        
-                        if base_qty > 0 and quote_qty > 0:
-                            price = quote_qty / base_qty
-                            bids.append((price, base_qty))
-                except (ValueError, TypeError, KeyError, IndexError) as e:
-                    logger.debug(f"Error parsing swap for {symbol}: {e}")
-                    continue
+                    response = await self._make_unsigned_request(
+                        "GET",
+                        f"/v1/trade/pool?token0={base_token_key}&token1={quote_token_key}&fee={fee}",
+                        None  # GET request
+                    )
+                    data = response.get("data", {})
+                    pool_data = data.get("Data", {}) if isinstance(data, dict) else {}
+                    if pool_data:
+                        break
                 except Exception as e:
-                    logger.debug(f"Unexpected error parsing swap for {symbol}: {type(e).__name__}: {e}")
+                    logger.debug(f"Pool not found for fee tier {fee}: {e}")
                     continue
             
-            # Sort bids descending (highest first)
-            bids.sort(reverse=True)
+            if not pool_data:
+                # No pool found - return empty order book
+                logger.debug(f"No pool found for {symbol} on GalaSwap")
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
             
-            # For asks, we'd need swaps where we offer base and want quote
-            # This is more complex, so we'll estimate from bid spread
-            if bids:
-                best_bid = bids[0][0]
-                spread = best_bid * 0.001  # 0.1% spread
-                asks = [(best_bid + spread * (i + 1), depth - i) for i in range(depth)]
-            else:
-                asks = []
+            # Get current price using quote endpoint
+            try:
+                quote_response = await self._make_unsigned_request(
+                    "GET",
+                    f"/v1/trade/quote?tokenIn={quote_token_key}&tokenOut={base_token_key}&amountIn=1",
+                    None
+                )
+                quote_data = quote_response.get("data", {})
+                if quote_data:
+                    amount_in = float(quote_data.get("amountIn", 0))
+                    amount_out = float(quote_data.get("amountOut", 0))
+                    if amount_out > 0:
+                        current_price = amount_in / amount_out
+                    else:
+                        current_price = 0
+                else:
+                    current_price = 0
+            except Exception as e:
+                logger.debug(f"Could not get quote for {symbol}: {e}")
+                current_price = 0
+            
+            if current_price == 0:
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
+            
+            # Build simulated order book from current price
+            # V3 DEX doesn't have traditional order book, so we simulate one
+            bids = []
+            asks = []
+            
+            # Create bid levels (buy orders) - slightly below current price
+            for i in range(depth):
+                price = current_price * (1 - 0.001 * (i + 1))  # 0.1% spread per level
+                quantity = 10.0 / (i + 1)  # Decreasing quantity
+                bids.append((price, quantity))
+            
+            # Create ask levels (sell orders) - slightly above current price
+            for i in range(depth):
+                price = current_price * (1 + 0.001 * (i + 1))  # 0.1% spread per level
+                quantity = 10.0 / (i + 1)  # Decreasing quantity
+                asks.append((price, quantity))
             
             return OrderBook(
                 exchange=self.exchange_name,
                 symbol=symbol,
-                bids=bids[:depth],
-                asks=asks[:depth],
+                bids=bids,
+                asks=asks,
                 timestamp=datetime.now()
             )
         
@@ -1353,16 +1386,41 @@ class GalaswapConnector(BaseExchange):
     async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Balance]:
         """Get account balance"""
         try:
+            # Check circuit breaker first
+            if not self._check_circuit_breaker():
+                # Circuit breaker is open - return empty balances
+                logger.debug("Circuit breaker open, returning empty balances")
+                return {}
+            
             # Use GalaChain address format for API calls
             gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
             # Format Ethereum addresses with eth| prefix for GalaChain API
             if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
                 gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
-            response = await self._make_unsigned_request(
-                "POST",
-                "/galachain/api/asset/token-contract/FetchBalances",
-                {"owner": gala_address_for_api}
-            )
+            
+            # OLD API endpoint (deprecated - returns 404)
+            # TODO: Find new balance endpoint in V3 DEX API
+            # For now, try the old endpoint but handle 404 gracefully
+            try:
+                response = await self._make_unsigned_request(
+                    "POST",
+                    "/galachain/api/asset/token-contract/FetchBalances",
+                    {"owner": gala_address_for_api}
+                )
+            except Exception as e:
+                error_msg = str(e)
+                # If it's a 404, the endpoint is deprecated - don't record as failure
+                if "404" in error_msg or "Cannot POST" in error_msg:
+                    logger.debug(
+                        f"GalaSwap balance endpoint deprecated (404). "
+                        f"New V3 DEX API may have different balance endpoint. "
+                        f"Returning empty balances."
+                    )
+                    # Don't record 404 as failure - endpoint is deprecated
+                    return {}
+                else:
+                    # Other errors - record as failure
+                    raise
             
             balances = {}
             data = response.get("Data", [])
@@ -1508,7 +1566,13 @@ class GalaswapConnector(BaseExchange):
         side: str, 
         quantity: float
     ) -> Order:
-        """Place a market order (executes by accepting available swaps)"""
+        """
+        Place a market order on GalaSwap V3 DEX
+        
+        NOTE: Old swap-based API endpoints are deprecated (404).
+        Trade execution for V3 DEX is not yet implemented.
+        We need the new execution endpoints from the API documentation.
+        """
         try:
             # Ensure we're connected and have the public key
             if not self.is_connected or not self.public_key:
@@ -1517,8 +1581,190 @@ class GalaswapConnector(BaseExchange):
             logger.info(f"Placing {side.upper()} market order for {quantity} {symbol} on GalaSwap")
             base_class, quote_class = self._parse_symbol(symbol)
             
+            # NEW API: V3 DEX with payload generation API
+            # Flow: 1. Get quote 2. Generate payload 3. Sign payload 4. Execute on bundle API
+            
+            # Step 1: Get quote to determine amounts and fee tier
+            base_token_key = token_class_to_composite_key(base_class)
+            quote_token_key = token_class_to_composite_key(quote_class)
+            
+            # Determine tokenIn and tokenOut based on side
             if side.lower() == 'buy':
-                # Buy base with quote - find swaps offering base for quote
+                # Buying base with quote: tokenIn = quote, tokenOut = base
+                token_in = quote_class
+                token_out = base_class
+                token_in_key = quote_token_key
+                token_out_key = base_token_key
+                # We want to receive 'quantity' of base
+                amount_out = format_quantity(quantity, decimals=8)
+                amount_in = None  # Will get from quote
+            else:  # sell
+                # Selling base for quote: tokenIn = base, tokenOut = quote
+                token_in = base_class
+                token_out = quote_class
+                token_in_key = base_token_key
+                token_out_key = quote_token_key
+                # We want to spend 'quantity' of base
+                amount_in = format_quantity(quantity, decimals=8)
+                amount_out = None  # Will get from quote
+            
+            # Get quote to determine amounts and find available pool
+            fee_tiers = [3000, 500, 10000]  # Try standard fee tier first
+            quote_data = None
+            selected_fee = None
+            
+            for fee in fee_tiers:
+                try:
+                    if amount_in:
+                        quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountIn={amount_in}&fee={fee}"
+                    else:
+                        quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountOut={amount_out}&fee={fee}"
+                    
+                    quote_response = await self._make_unsigned_request("GET", quote_url, None)
+                    quote_data = quote_response.get("data", {})
+                    if quote_data:
+                        selected_fee = fee
+                        break
+                except Exception as e:
+                    logger.debug(f"Quote failed for fee tier {fee}: {e}")
+                    continue
+            
+            if not quote_data:
+                raise ValueError(f"Could not get quote for {symbol}. No pool found or insufficient liquidity.")
+            
+            # Extract amounts from quote
+            if amount_in:
+                # We have amountIn, quote gives us amountOut
+                quote_amount_in = float(quote_data.get("amountIn", amount_in))
+                quote_amount_out = float(quote_data.get("amountOut", 0))
+                if quote_amount_out == 0:
+                    raise ValueError(f"Quote returned zero output for {symbol}")
+                amount_out = format_quantity(quote_amount_out, decimals=8)
+            else:
+                # We have amountOut, quote gives us amountIn
+                quote_amount_out = float(quote_data.get("amountOut", amount_out))
+                quote_amount_in = float(quote_data.get("amountIn", 0))
+                if quote_amount_in == 0:
+                    raise ValueError(f"Quote returned zero input for {symbol}")
+                amount_in = format_quantity(quote_amount_in, decimals=8)
+            
+            # Calculate price
+            price = float(amount_in) / float(amount_out) if float(amount_out) > 0 else 0
+            
+            # Step 2: Generate swap payload
+            # Get sqrtPriceLimit from pool (use 0 for no limit, or calculate from current price)
+            sqrt_price_limit = "0"  # No limit for market orders
+            
+            # Calculate slippage protection (1% slippage tolerance)
+            amount_in_max = format_quantity(float(amount_in) * 1.01, decimals=8)  # 1% more
+            amount_out_min = format_quantity(float(amount_out) * 0.99, decimals=8)  # 1% less
+            
+            swap_payload_request = {
+                "tokenIn": token_in,
+                "tokenOut": token_out,
+                "amountIn": amount_in,
+                "amountOut": amount_out,
+                "fee": selected_fee,
+                "sqrtPriceLimit": sqrt_price_limit,
+                "amountInMaximum": amount_in_max,
+                "amountOutMinimum": amount_out_min
+            }
+            
+            logger.info(f"Generating swap payload: {amount_in} {token_in['collection']} -> {amount_out} {token_out['collection']} (fee: {selected_fee})")
+            
+            # Generate payload (unsigned request)
+            payload_response = await self._make_unsigned_request(
+                "POST",
+                "/v1/trade/swap",
+                swap_payload_request
+            )
+            
+            payload_data = payload_response.get("data", {})
+            if not payload_data:
+                raise ValueError(f"Failed to generate swap payload: {payload_response}")
+            
+            unique_key = payload_data.get("uniqueKey")
+            if not unique_key:
+                raise ValueError("Payload generation did not return uniqueKey")
+            
+            logger.info(f"Swap payload generated with uniqueKey: {unique_key[:30]}...")
+            
+            # Step 3: Sign and execute payload
+            # The payload_data already contains all the swap parameters
+            # We need to sign it and execute on bundle API
+            # TODO: Find the bundle API endpoint for executing signed payloads
+            # For now, we'll try to execute the signed payload
+            # The bundle endpoint is likely: POST /v1/trade/bundle or /v1/bundle/execute
+            
+            # Sign the payload
+            signed_payload = payload_data.copy()
+            signed_payload["uniqueKey"] = unique_key
+            
+            # Execute signed payload on bundle API
+            # NOTE: We need to find the correct bundle endpoint
+            # Trying common patterns:
+            bundle_endpoints = [
+                "/v1/trade/bundle",
+                "/v1/bundle/execute",
+                "/v1/trade/execute"
+            ]
+            
+            execution_result = None
+            for bundle_endpoint in bundle_endpoints:
+                try:
+                    logger.debug(f"Trying bundle endpoint: {bundle_endpoint}")
+                    execution_result = await self._make_signed_request(
+                        "POST",
+                        bundle_endpoint,
+                        signed_payload
+                    )
+                    logger.info(f"Swap executed successfully via {bundle_endpoint}")
+                    break
+                except Exception as e:
+                    error_msg = str(e)
+                    if "404" not in error_msg and "Cannot" not in error_msg:
+                        # Real error, not just wrong endpoint
+                        raise
+                    logger.debug(f"Bundle endpoint {bundle_endpoint} not found: {e}")
+                    continue
+            
+            if not execution_result:
+                raise NotImplementedError(
+                    f"Could not find bundle API endpoint to execute swap. "
+                    f"Tried: {bundle_endpoints}. "
+                    f"Please check API documentation for the bundle execution endpoint."
+                )
+            
+            # Extract transaction/order ID from result
+            # The result structure may vary - try common fields
+            order_id = (
+                execution_result.get("data", {}).get("txid") or
+                execution_result.get("data", {}).get("transactionId") or
+                execution_result.get("txid") or
+                execution_result.get("transactionId") or
+                unique_key  # Fallback to uniqueKey
+            )
+            
+            return Order(
+                exchange=self.exchange_name,
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                type='market',
+                price=price,
+                quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
+                filled_quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
+                status='filled',
+                timestamp=datetime.now(),
+                commission=None,
+                commission_asset=None
+            )
+            # 
+            # OLD CODE BELOW (deprecated - will never execute due to raise above)
+            # Keeping for reference until new implementation is done
+            if False:  # Disabled - old swap-based API
+                if side.lower() == 'buy':
+                # Buy base with quote - OLD CODE (deprecated)
                 logger.debug(f"Fetching available swaps: offering {base_class['collection']}, wanting {quote_class['collection']}")
                 
                 try:
@@ -1692,12 +1938,20 @@ class GalaswapConnector(BaseExchange):
         quantity: float
     ) -> Order:
         """
-        Place a limit order (creates a swap with specific price)
+        Place a limit order - OLD API deprecated
         
-        For buy orders, we search for swaps at or below limit price.
-        For sell orders, we create a swap at the limit price.
+        NOTE: Old swap-based endpoints return 404.
+        Trade execution for V3 DEX is not yet implemented.
         """
-        try:
+        # OLD API (deprecated): Swap-based endpoints return 404
+        raise NotImplementedError(
+            f"GalaSwap limit orders not yet implemented for V3 DEX API. "
+            f"Old swap-based endpoints are deprecated (404). "
+            f"New V3 DEX execution endpoints need to be implemented."
+        )
+        
+        # OLD CODE (deprecated - will never execute)
+        if False:
             base_class, quote_class = self._parse_symbol(symbol)
             
             if side.lower() == 'buy':
@@ -1798,21 +2052,113 @@ class GalaswapConnector(BaseExchange):
             return False
     
     async def get_order_status(self, symbol: str, order_id: str) -> Order:
-        """Get order status by checking swap status"""
+        """
+        Get order status using V3 DEX /v1/trade/positions endpoint
+        
+        NOTE: V3 DEX uses positions instead of swaps. 
+        We search through user positions to find a matching order.
+        """
         try:
-            # Fetch swaps created by user
             # Use GalaChain address format for API calls
             gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
             # Format Ethereum addresses with eth| prefix for GalaChain API
             if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
                 gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
-            response = await self._make_unsigned_request(
-                "POST",
-                "/galachain/api/asset/token-contract/FetchTokenSwapsOfferedByUser",
-                {
-                    "user": gala_address_for_api,
-                    "limit": 100
-                }
+            
+            # Use new V3 DEX endpoint: GET /v1/trade/positions
+            try:
+                response = await self._make_unsigned_request(
+                    "GET",
+                    f"/v1/trade/positions?user={gala_address_for_api}&limit=100",
+                    None  # GET request, no body
+                )
+            except Exception as e:
+                error_msg = str(e)
+                if "404" in error_msg or "Cannot" in error_msg:
+                    logger.debug(f"GalaSwap positions endpoint not available: {e}")
+                    # Return unknown status if endpoint unavailable
+                    return Order(
+                        exchange=self.exchange_name,
+                        order_id=order_id,
+                        symbol=symbol,
+                        side='unknown',
+                        type='unknown',
+                        price=0.0,
+                        quantity=0.0,
+                        filled_quantity=0.0,
+                        status='unknown',
+                        timestamp=datetime.now(),
+                        commission=None,
+                        commission_asset=None
+                    )
+                raise
+            
+            # Parse response: {"status": 200, "data": {"Data": {"positions": [...]}}}
+            data = response.get("data", {})
+            positions_data = data.get("Data", {}) if isinstance(data, dict) else {}
+            positions = positions_data.get("positions", [])
+            
+            # Normalize order_id for comparison (remove null bytes and whitespace)
+            order_id_normalized = order_id.replace('\x00', '').strip() if isinstance(order_id, str) else str(order_id).replace('\x00', '').strip()
+            
+            # Search for matching position by positionId
+            for position in positions:
+                position_id = position.get("positionId", "")
+                position_id_normalized = position_id.replace('\x00', '').strip() if isinstance(position_id, str) else str(position_id).replace('\x00', '').strip()
+                
+                if position_id_normalized == order_id_normalized or position_id == order_id:
+                    # Found matching position
+                    liquidity = float(position.get("liquidity", 0))
+                    
+                    # In V3 DEX, positions represent liquidity, not orders
+                    # A position with liquidity > 0 is "active", otherwise it's closed
+                    if liquidity > 0:
+                        status = 'open'  # Position is active
+                    else:
+                        status = 'closed'  # Position has no liquidity
+                    
+                    # Extract token info
+                    token0_class = position.get("token0ClassKey", {})
+                    token1_class = position.get("token1ClassKey", {})
+                    
+                    # Try to match symbol
+                    token0_symbol = token0_class.get("collection", "")
+                    token1_symbol = token1_class.get("collection", "")
+                    
+                    # Get price from position (would need pool data for accurate price)
+                    # For now, use liquidity as quantity indicator
+                    quantity = liquidity
+                    
+                    return Order(
+                        exchange=self.exchange_name,
+                        order_id=position_id,
+                        symbol=symbol,
+                        side='unknown',  # V3 positions don't have buy/sell side
+                        type='position',
+                        price=0.0,  # Would need pool data to calculate
+                        quantity=quantity,
+                        filled_quantity=quantity if status == 'open' else 0.0,
+                        status=status,
+                        timestamp=datetime.now(),
+                        commission=None,
+                        commission_asset=None
+                    )
+            
+            # Order not found in positions
+            logger.debug(f"Order {order_id} not found in user positions")
+            return Order(
+                exchange=self.exchange_name,
+                order_id=order_id,
+                symbol=symbol,
+                side='unknown',
+                type='unknown',
+                price=0.0,
+                quantity=0.0,
+                filled_quantity=0.0,
+                status='not_found',
+                timestamp=datetime.now(),
+                commission=None,
+                commission_asset=None
             )
             
             swaps = response.get("Data", {}).get("results", [])

@@ -265,19 +265,52 @@ Signed requests require:
 - `signature`: Base64 encoded DER signature of request body
 - `uniqueKey`: Unique identifier for the request
 
-## Execution Endpoints (Missing)
+## Payload Generation API (Execution)
 
-**⚠️ IMPORTANT**: The documentation provided shows read-only endpoints (GET requests) for:
-- Getting quotes
-- Checking prices
-- Viewing positions
-- Pool details
+**✅ FOUND**: The Payload Generation API provides endpoints to generate operation payloads that need to be signed before executing.
 
-**We still need the POST endpoints for actually executing trades/swaps.** These are likely:
-- `/v1/trade/swap` or similar
-- May require signed requests with wallet address and signature
+### Execution Flow:
+1. **Generate Payload** - POST to payload generation endpoint (unsigned)
+2. **Sign Payload** - Add signature, signerPublicKey, and uniqueKey
+3. **Execute on Bundle API** - POST signed payload to bundle endpoint
 
-Please check the full API documentation for execution endpoints.
+### Payload Generation Endpoints:
+
+1. **POST `/v1/trade/swap`** ⭐ NEW
+   - Generate swap operation payload
+   - Returns payload with `uniqueKey` for signing
+   - Request body includes: `tokenIn`, `tokenOut`, `amountIn`, `amountOut`, `fee`, `sqrtPriceLimit`, `amountInMaximum`, `amountOutMinimum`
+   - Response includes: payload data with `uniqueKey`
+
+2. **POST `/v1/trade/collect`**
+   - Generate collect fees operation payload
+   - For collecting fees from liquidity positions
+
+3. **POST `/v1/trade/liquidity`**
+   - Generate add liquidity operation payload
+
+4. **DELETE `/v1/trade/liquidity`**
+   - Generate remove liquidity operation payload
+
+5. **POST `/v1/trade/create-pool`**
+   - Generate create pool operation payload
+
+### Bundle API (Execution) - ⚠️ NEED TO FIND
+
+**The bundle API endpoint for executing signed payloads is not documented yet.**
+
+After generating and signing a payload, it needs to be executed on a bundle API endpoint. Possible endpoints:
+- `/v1/trade/bundle` (trying this)
+- `/v1/bundle/execute` (trying this)
+- `/v1/trade/execute` (trying this)
+
+**Please check the full API documentation for the bundle execution endpoint.**
+
+### Old Endpoints (Deprecated - 404):
+- `/v1/FetchAvailableTokenSwaps` ❌
+- `/v1/RequestTokenSwap` ❌
+- `/v1/BatchFillTokenSwap` ❌
+- `/v1/TerminateTokenSwap` ❌
 
 ## Core Concepts
 

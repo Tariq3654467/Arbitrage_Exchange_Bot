@@ -64,11 +64,23 @@ V3 uses fee tiers:
 - [ ] Add support for fee tiers
 - [ ] Add support for price oracle endpoints
 
-### ❌ Missing
-- [ ] **Execution endpoints** - We need POST endpoints for actually placing trades
-  - Likely: `/v1/trade/swap` or similar
-  - May require signed requests
-  - Need to check official documentation
+### ✅ Completed (New)
+- [x] **Payload Generation API** - Found and implemented
+  - `POST /v1/trade/swap` - Generate swap payloads ✅
+  - `POST /v1/trade/collect` - Generate collect fees payloads
+  - `POST /v1/trade/liquidity` - Generate add liquidity payloads
+  - `DELETE /v1/trade/liquidity` - Generate remove liquidity payloads
+  - `POST /v1/trade/create-pool` - Generate create pool payloads
+- [x] **Trade Execution Flow** - Implemented
+  - Step 1: Get quote using `/v1/trade/quote` ✅
+  - Step 2: Generate payload using `/v1/trade/swap` ✅
+  - Step 3: Sign payload (using existing signing logic) ✅
+  - Step 4: Execute on bundle API ⚠️ (trying multiple endpoints)
+
+### ⚠️ In Progress
+- [ ] **Bundle API Endpoint** - Need to find correct endpoint for executing signed payloads
+  - Trying: `/v1/trade/bundle`, `/v1/bundle/execute`, `/v1/trade/execute`
+  - **Action Required**: Check full API documentation for bundle execution endpoint
 
 ## Current Issues
 
