@@ -1997,28 +1997,28 @@ class GalaswapConnector(BaseExchange):
                     bundle_data.get("txid") or
                     unique_key  # Fallback to uniqueKey
                 )
-                        else:
+            else:
                 order_id = unique_key  # Fallback
             
             if not order_id:
                 order_id = unique_key
             
             logger.info(f"Swap executed successfully. Transaction ID: {order_id}")
-                
-                return Order(
-                    exchange=self.exchange_name,
+            
+            return Order(
+                exchange=self.exchange_name,
                 order_id=order_id,
-                    symbol=symbol,
-                    side=side,
-                    type='market',
+                symbol=symbol,
+                side=side,
+                type='market',
                 price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 filled_quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 status='filled',
-                    timestamp=datetime.now(),
-                    commission=None,
-                    commission_asset=None
-                )
+                timestamp=datetime.now(),
+                commission=None,
+                commission_asset=None
+            )
         
         except Exception as e:
             logger.error(f"Error placing market order: {e}")
