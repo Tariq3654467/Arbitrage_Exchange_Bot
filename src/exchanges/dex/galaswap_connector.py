@@ -288,6 +288,42 @@ def sign_request_body(body: dict, private_key: str) -> str:
         raise
 
 
+def token_class_to_composite_key(token_class: Dict) -> str:
+    """
+    Convert token class dict to composite key string format used by new GalaSwap API.
+    
+    Format: "collection$category$type$additionalKey"
+    Example: {"collection": "GALA", "category": "Unit", "type": "none", "additionalKey": "none"}
+    -> "GALA$Unit$none$none"
+    """
+    collection = token_class.get("collection", "")
+    category = token_class.get("category", "")
+    type_val = token_class.get("type", "none")
+    additional_key = token_class.get("additionalKey", "none")
+    
+    return f"{collection}${category}${type_val}${additional_key}"
+
+
+def composite_key_to_token_class(composite_key: str) -> Dict:
+    """
+    Convert composite key string to token class dict.
+    
+    Format: "collection$category$type$additionalKey"
+    Example: "GALA$Unit$none$none"
+    -> {"collection": "GALA", "category": "Unit", "type": "none", "additionalKey": "none"}
+    """
+    parts = composite_key.split("$")
+    if len(parts) != 4:
+        raise ValueError(f"Invalid composite key format: {composite_key}")
+    
+    return {
+        "collection": parts[0],
+        "category": parts[1],
+        "type": parts[2],
+        "additionalKey": parts[3]
+    }
+
+
 def format_quantity(quantity: float, decimals: int = 8) -> str:
     """
     Format quantity to string with specified decimal places.
@@ -884,17 +920,22 @@ class GalaswapConnector(BaseExchange):
             
             except (ClientConnectorError, asyncio.TimeoutError) as e:
                 last_error = e
+                # Log connection errors with full URL for debugging
+                logger.warning(
+                    f"Connection/timeout error to Galaswap API: "
+                    f"URL={self.API_BASE_URL}{endpoint}, "
+                    f"Error={type(e).__name__}: {str(e)[:200]}"
+                )
                 if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
                     delay = self.RETRY_DELAY_BASE * (2 ** attempt)
                     logger.warning(
-                        f"Connection/timeout error to Galaswap API {endpoint} "
-                        f"(attempt {attempt + 1}/{self.MAX_RETRIES}): {type(e).__name__}. "
-                        f"Retrying in {delay}s..."
+                        f"Retrying in {delay}s... (attempt {attempt + 1}/{self.MAX_RETRIES})"
                     )
                     await asyncio.sleep(delay)
                 else:
-                    error_msg = f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: {type(e).__name__}: {e}"
+                    error_msg = f"Failed to connect to Galaswap API after {self.MAX_RETRIES} attempts: URL={self.API_BASE_URL}{endpoint}, Error={type(e).__name__}: {e}"
                     logger.error(error_msg)
+                    self._record_failure()  # Record failure for circuit breaker
                     raise Exception(error_msg) from e
             
             except Exception as e:
@@ -984,24 +1025,36 @@ class GalaswapConnector(BaseExchange):
         for attempt in range(self.MAX_RETRIES if retry_on_connection_error else 1):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
+                    # Handle GET vs POST requests differently
+                    if method.upper() == "GET":
+                        # GET request - query params in URL, no body
+                        request_kwargs = {"headers": headers}
+                    else:
+                        # POST/PUT/etc - JSON body
+                        request_kwargs = {"json": body or {}, "headers": headers}
+                    
                     async with session.request(
                         method,
                         f"{self.API_BASE_URL}{endpoint}",
-                        json=body or {},
-                        headers=headers
+                        **request_kwargs
                     ) as response:
                         if response.status >= 400:
                             error_text = await response.text()
                             
+                            # Log the actual error for debugging (especially important with new API URL)
+                            logger.warning(
+                                f"Galaswap API error {response.status} for {endpoint}: "
+                                f"URL={self.API_BASE_URL}{endpoint}, "
+                                f"Error={error_text[:200]}"
+                            )
+                            
                             # Handle 502 Bad Gateway and 503 Service Unavailable as temporary errors
                             if response.status in [502, 503, 504]:
-                                # These are temporary server errors - record failure but don't spam logs
-                                logger.debug(f"Galaswap API temporary error {response.status}: {error_text[:100]}")
+                                # These are temporary server errors
                                 self._record_failure()
-                                raise Exception(f"API error {response.status}: Service temporarily unavailable")
+                                raise Exception(f"API error {response.status}: Service temporarily unavailable - {error_text[:100]}")
                             else:
-                                # Other 4xx/5xx errors - log but don't spam
-                                logger.debug(f"Galaswap API error {response.status}: {error_text[:100]}")
+                                # Other 4xx/5xx errors - log the actual error
                                 self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
@@ -1013,20 +1066,22 @@ class GalaswapConnector(BaseExchange):
                 last_error = e
                 self._record_failure()
                 
+                # Log connection errors with full URL for debugging (especially important with new API URL)
+                error_msg = (
+                    f"Galaswap API connection error: "
+                    f"URL={self.API_BASE_URL}{endpoint}, "
+                    f"Error={type(e).__name__}: {str(e)[:200]}"
+                )
+                
                 if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
                     delay = self.RETRY_DELAY_BASE * (2 ** attempt)
-                    # Only log on first attempt to reduce spam
+                    # Log on first attempt to see what's failing
                     if attempt == 0:
-                        logger.debug(
-                            f"Galaswap connection error (attempt {attempt + 1}/{self.MAX_RETRIES}): {type(e).__name__}. "
-                            f"Retrying in {delay}s..."
-                        )
+                        logger.warning(f"{error_msg} - Retrying in {delay}s... (attempt {attempt + 1}/{self.MAX_RETRIES})")
                     await asyncio.sleep(delay)
                 else:
-                    logger.debug(
-                        f"Galaswap API connection failed after {self.MAX_RETRIES} attempts: {type(e).__name__}"
-                    )
-                    raise
+                    logger.error(f"{error_msg} - Failed after {self.MAX_RETRIES} attempts")
+                    raise Exception(f"Failed to connect to Galaswap API: {error_msg}") from e
             
             except Exception as e:
                 # For non-connection errors, don't retry
@@ -1193,37 +1248,93 @@ class GalaswapConnector(BaseExchange):
     
     async def get_ticker(self, symbol: str) -> Dict:
         """
-        Get ticker data for a symbol
+        Get ticker data for a symbol using new GalaSwap DEX API
         
+        Uses /v1/trade/price endpoint for base token price, then calculates bid/ask from quotes.
         Returns empty ticker data if API is unreachable to allow bot to continue.
         """
         try:
-            order_book = await self.get_order_book(symbol, depth=1)
+            base_class, quote_class = self._parse_symbol(symbol)
             
-            best_bid = order_book.best_bid
-            best_ask = order_book.best_ask
+            # Get base token price using new API
+            base_token_key = token_class_to_composite_key(base_class)
             
-            if best_bid and best_ask:
-                mid_price = (best_bid[0] + best_ask[0]) / 2
-                return {
-                    'symbol': symbol,
-                    'bid': best_bid[0],
-                    'ask': best_ask[0],
-                    'last': mid_price,
-                    'volume': 0.0,  # Volume not available from API
-                    'timestamp': datetime.now()
-                }
-            else:
-                # Return empty ticker data instead of raising
-                logger.debug(f"No price data available for {symbol} on Galaswap")
-                return {
-                    'symbol': symbol,
-                    'bid': 0.0,
-                    'ask': 0.0,
-                    'last': 0.0,
-                    'volume': 0.0,
-                    'timestamp': datetime.now()
-                }
+            try:
+                # Try new API endpoint: GET /v1/trade/price
+                # Alternative: /price-oracle/fetch-price for historical data
+                response = await self._make_unsigned_request(
+                    "GET",
+                    f"/v1/trade/price?token={base_token_key}",
+                    None  # GET request, no body
+                )
+                
+                # Response format: {"price": "number", "timestamp": "string"}
+                # Or wrapped in data: {"data": {"price": "...", "timestamp": "..."}}
+                if isinstance(response, dict):
+                    if "data" in response:
+                        price_data = response["data"]
+                    elif "price" in response:
+                        price_data = response
+                    else:
+                        price_data = response
+                else:
+                    price_data = response
+                
+                base_price = float(price_data.get("price", 0))
+                
+                if base_price > 0:
+                    # For DEX, bid and ask are typically close to the current price
+                    # Use a small spread estimate (0.1%) or get quotes
+                    spread = base_price * 0.001  # 0.1% spread
+                    bid = base_price - spread
+                    ask = base_price + spread
+                    
+                    return {
+                        'symbol': symbol,
+                        'bid': bid,
+                        'ask': ask,
+                        'last': base_price,
+                        'volume': 0.0,  # Volume not available from price endpoint
+                        'timestamp': datetime.now()
+                    }
+                else:
+                    logger.debug(f"No price data available for {symbol} on Galaswap")
+                    return {
+                        'symbol': symbol,
+                        'bid': 0.0,
+                        'ask': 0.0,
+                        'last': 0.0,
+                        'volume': 0.0,
+                        'timestamp': datetime.now()
+                    }
+                    
+            except Exception as api_error:
+                # Fallback to order book method if new API fails
+                logger.debug(f"New price API failed for {symbol}, trying order book: {api_error}")
+                order_book = await self.get_order_book(symbol, depth=1)
+                
+                best_bid = order_book.best_bid
+                best_ask = order_book.best_ask
+                
+                if best_bid and best_ask:
+                    mid_price = (best_bid[0] + best_ask[0]) / 2
+                    return {
+                        'symbol': symbol,
+                        'bid': best_bid[0],
+                        'ask': best_ask[0],
+                        'last': mid_price,
+                        'volume': 0.0,
+                        'timestamp': datetime.now()
+                    }
+                else:
+                    return {
+                        'symbol': symbol,
+                        'bid': 0.0,
+                        'ask': 0.0,
+                        'last': 0.0,
+                        'volume': 0.0,
+                        'timestamp': datetime.now()
+                    }
         
         except Exception as e:
             # Return empty ticker data on any error to allow bot to continue
