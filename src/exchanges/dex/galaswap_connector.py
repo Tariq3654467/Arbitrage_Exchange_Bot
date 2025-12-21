@@ -513,7 +513,7 @@ class GalaswapConnector(BaseExchange):
             # Addresses match - use provided format (may have eth| or client| prefix)
             if '|' in wallet_address:
                 # Already in GalaChain format (eth| or client|)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using GalaChain address format: {wallet_address[:30]}...")
             elif wallet_address.startswith('0x'):
                 # Ethereum address - convert to eth| format for GalaChain API
@@ -521,7 +521,7 @@ class GalaswapConnector(BaseExchange):
                 logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
                 # Assume it's already in GalaChain format (without prefix, might be client| format)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
@@ -1165,7 +1165,7 @@ class GalaswapConnector(BaseExchange):
                                 # Other 4xx/5xx errors - log the actual error
                                 # Only record as failure if not a deprecated endpoint 404 or pool not found 400
                                 if not (response.status == 404 and is_deprecated) and not is_pool_not_found:
-                                    self._record_failure()
+                                self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
                         # Success - reset circuit breaker
@@ -1253,8 +1253,8 @@ class GalaswapConnector(BaseExchange):
             
             pool_data = None
             for fee in fee_tiers:
-                try:
-                    response = await self._make_unsigned_request(
+            try:
+                response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
@@ -1446,30 +1446,30 @@ class GalaswapConnector(BaseExchange):
             except Exception as api_error:
                 # Fallback to order book method if new API fails
                 logger.debug(f"New price API failed for {symbol}, trying order book: {api_error}")
-                order_book = await self.get_order_book(symbol, depth=1)
-                
-                best_bid = order_book.best_bid
-                best_ask = order_book.best_ask
-                
-                if best_bid and best_ask:
-                    mid_price = (best_bid[0] + best_ask[0]) / 2
-                    return {
-                        'symbol': symbol,
-                        'bid': best_bid[0],
-                        'ask': best_ask[0],
-                        'last': mid_price,
+            order_book = await self.get_order_book(symbol, depth=1)
+            
+            best_bid = order_book.best_bid
+            best_ask = order_book.best_ask
+            
+            if best_bid and best_ask:
+                mid_price = (best_bid[0] + best_ask[0]) / 2
+                return {
+                    'symbol': symbol,
+                    'bid': best_bid[0],
+                    'ask': best_ask[0],
+                    'last': mid_price,
                         'volume': 0.0,
-                        'timestamp': datetime.now()
-                    }
-                else:
-                    return {
-                        'symbol': symbol,
-                        'bid': 0.0,
-                        'ask': 0.0,
-                        'last': 0.0,
-                        'volume': 0.0,
-                        'timestamp': datetime.now()
-                    }
+                    'timestamp': datetime.now()
+                }
+            else:
+                return {
+                    'symbol': symbol,
+                    'bid': 0.0,
+                    'ask': 0.0,
+                    'last': 0.0,
+                    'volume': 0.0,
+                    'timestamp': datetime.now()
+                }
         
         except Exception as e:
             # Return empty ticker data on any error to allow bot to continue
@@ -1504,11 +1504,11 @@ class GalaswapConnector(BaseExchange):
             # Try old endpoint first, then try alternative approaches
             balance_data = None
             try:
-                response = await self._make_unsigned_request(
-                    "POST",
-                    "/galachain/api/asset/token-contract/FetchBalances",
-                    {"owner": gala_address_for_api}
-                )
+            response = await self._make_unsigned_request(
+                "POST",
+                "/galachain/api/asset/token-contract/FetchBalances",
+                {"owner": gala_address_for_api}
+            )
                 balance_data = response.get("Data", [])
             except Exception as e:
                 error_msg = str(e)
@@ -1523,7 +1523,7 @@ class GalaswapConnector(BaseExchange):
                     try:
                         positions_response = await self._make_unsigned_request(
                             "GET",
-                            f"/v1/trade/positions?user={gala_address_for_api}&limit=100",
+                            f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
                             None
                         )
                         positions_data = positions_response.get("data", {})
@@ -1739,6 +1739,11 @@ class GalaswapConnector(BaseExchange):
             base_token_key = token_class_to_composite_key(base_class)
             quote_token_key = token_class_to_composite_key(quote_class)
             
+            # IMPORTANT: For quote endpoint, we need to ensure the underlying pool exists
+            # The pool requires token0 < token1 lexicographically
+            # But quote endpoint uses tokenIn/tokenOut, which can be in any order
+            # However, if the pool doesn't exist, the quote will fail
+            
             # Determine tokenIn and tokenOut based on side
             if side.lower() == 'buy':
                 # Buying base with quote: tokenIn = quote, tokenOut = base
@@ -1759,29 +1764,78 @@ class GalaswapConnector(BaseExchange):
                 amount_in = format_quantity(quantity, decimals=8)
                 amount_out = None  # Will get from quote
             
+            # Log the quote request for debugging
+            logger.debug(
+                f"Getting quote for {symbol} ({side}): "
+                f"tokenIn={token_in_key}, tokenOut={token_out_key}, "
+                f"amountIn={amount_in}, amountOut={amount_out}"
+            )
+            
             # Get quote to determine amounts and find available pool
-            fee_tiers = [3000, 500, 10000]  # Try standard fee tier first
+            # Note: Quote endpoint doesn't require token ordering (token0/token1), it uses tokenIn/tokenOut
+            # But the underlying pool must exist, and pools require token0 < token1
+            # Try without fee first (API will use default), then with specific fee tiers
+            fee_options = [None, 3000, 500, 10000]  # Try without fee first, then specific tiers
             quote_data = None
             selected_fee = None
+            last_error = None
             
-            for fee in fee_tiers:
+            for fee in fee_options:
                 try:
+                    # Build quote URL
                     if amount_in:
-                        quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountIn={amount_in}&fee={fee}"
+                        if fee is not None:
+                            quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountIn={amount_in}&fee={fee}"
+                        else:
+                            quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountIn={amount_in}"
                     else:
-                        quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountOut={amount_out}&fee={fee}"
+                        if fee is not None:
+                            quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountOut={amount_out}&fee={fee}"
+                        else:
+                            quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountOut={amount_out}"
                     
+                    logger.debug(f"Getting quote for {symbol}: {quote_url}")
                     quote_response = await self._make_unsigned_request("GET", quote_url, None)
-                    quote_data = quote_response.get("data", {})
-                    if quote_data:
-                        selected_fee = fee
+                    
+                    # Check response structure
+                    if isinstance(quote_response, dict):
+                        quote_data = quote_response.get("data", {})
+                        # If no "data" key, check if response itself is the data
+                        if not quote_data and ("amountIn" in quote_response or "amountOut" in quote_response):
+                            quote_data = quote_response
+                    
+                    if quote_data and quote_data.get("amountIn") and quote_data.get("amountOut"):
+                        selected_fee = fee if fee is not None else 3000  # Default to 3000 if no fee specified
+                        logger.info(
+                            f"Got quote for {symbol} with fee tier {selected_fee}: "
+                            f"{quote_data.get('amountIn')} -> {quote_data.get('amountOut')}"
+                        )
                         break
+                    else:
+                        logger.debug(f"Quote response for fee {fee} missing data: {quote_response}")
                 except Exception as e:
-                    logger.debug(f"Quote failed for fee tier {fee}: {e}")
+                    last_error = e
+                    error_msg = str(e)
+                    # Log more details about the error
+                    if "Pool not found" in error_msg or "Pool data not found" in error_msg:
+                        logger.debug(f"Pool not found for {symbol} with fee tier {fee}")
+                    elif "Token0 must be smaller" in error_msg:
+                        # Quote endpoint shouldn't have this issue, but log it
+                        logger.debug(f"Token ordering issue for quote {symbol} with fee tier {fee}: {e}")
+                    elif "400" in error_msg or "404" in error_msg:
+                        logger.debug(f"Quote endpoint error for {symbol} with fee {fee}: {error_msg[:200]}")
+                    else:
+                        logger.warning(f"Quote failed for {symbol} with fee tier {fee}: {e}")
                     continue
             
             if not quote_data:
-                raise ValueError(f"Could not get quote for {symbol}. No pool found or insufficient liquidity.")
+                error_details = f"Last error: {last_error}" if last_error else "No errors logged"
+                raise ValueError(
+                    f"Could not get quote for {symbol}. "
+                    f"No pool found or insufficient liquidity. "
+                    f"Tried fee tiers: {fee_options}. "
+                    f"{error_details}"
+                )
             
             # Extract amounts from quote
             if amount_in:
@@ -1803,8 +1857,70 @@ class GalaswapConnector(BaseExchange):
             price = float(amount_in) / float(amount_out) if float(amount_out) > 0 else 0
             
             # Step 2: Generate swap payload
-            # Get sqrtPriceLimit from pool (use 0 for no limit, or calculate from current price)
-            sqrt_price_limit = "0"  # No limit for market orders
+            # Get sqrtPriceLimit from pool data
+            # sqrtPriceLimit must be a valid numeric string in decimal format
+            # For market orders (no price limit), we use the current sqrtPrice from the pool
+            # or a very large/small number depending on direction
+            sqrt_price_limit = None
+            
+            # Try to get current sqrtPrice from pool
+            # Determine token0/token1 order for pool lookup
+            if base_token_key > quote_token_key:
+                pool_token0 = quote_token_key
+                pool_token1 = base_token_key
+            else:
+                pool_token0 = base_token_key
+                pool_token1 = quote_token_key
+            
+            # Try to get pool data to extract sqrtPrice
+            try:
+                pool_response = await self._make_unsigned_request(
+                    "GET",
+                    f"/v1/trade/pool?token0={pool_token0}&token1={pool_token1}&fee={selected_fee}",
+                    None
+                )
+                pool_data = pool_response.get("data", {}).get("Data", {})
+                if pool_data and pool_data.get("sqrtPrice"):
+                    current_sqrt_price = pool_data.get("sqrtPrice")
+                    # Convert to string, ensuring it's a valid numeric format
+                    if isinstance(current_sqrt_price, (int, float)):
+                        current_sqrt_price_str = f"{current_sqrt_price:.18f}"  # Use high precision
+                    else:
+                        current_sqrt_price_str = str(current_sqrt_price)
+                    
+                    # For market orders, set sqrtPriceLimit based on direction:
+                    # - Buy (tokenIn=quote, tokenOut=base): use very large (no upper limit)
+                    # - Sell (tokenIn=base, tokenOut=quote): use very small but not zero (no lower limit)
+                    if side.lower() == 'buy':
+                        # Buying: allow execution at any price (no upper limit)
+                        # Use a very large number
+                        sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                    else:
+                        # Selling: allow execution at any price (no lower limit)
+                        # Use a very small positive number (not zero)
+                        sqrt_price_limit = "0.000000000000000001"  # Very small but not zero
+                    
+                    logger.debug(f"Using sqrtPriceLimit for {side} order: {sqrt_price_limit} (current pool sqrtPrice: {current_sqrt_price_str})")
+                else:
+                    # Fallback: use direction-based defaults
+                    if side.lower() == 'buy':
+                        sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                    else:
+                        sqrt_price_limit = "0.000000000000000001"
+            except Exception as e:
+                logger.debug(f"Could not get pool sqrtPrice, using default: {e}")
+                # Fallback: use direction-based defaults
+                if side.lower() == 'buy':
+                    sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                else:
+                    sqrt_price_limit = "0.000000000000000001"
+            
+            # Ensure sqrtPriceLimit is a valid numeric string (not "0" or empty)
+            if not sqrt_price_limit or sqrt_price_limit == "0" or sqrt_price_limit == "0.0":
+                if side.lower() == 'buy':
+                    sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                else:
+                    sqrt_price_limit = "0.000000000000000001"
             
             # Calculate slippage protection (1% slippage tolerance)
             amount_in_max = format_quantity(float(amount_in) * 1.01, decimals=8)  # 1% more
@@ -1881,28 +1997,28 @@ class GalaswapConnector(BaseExchange):
                     bundle_data.get("txid") or
                     unique_key  # Fallback to uniqueKey
                 )
-            else:
+                        else:
                 order_id = unique_key  # Fallback
             
             if not order_id:
                 order_id = unique_key
             
             logger.info(f"Swap executed successfully. Transaction ID: {order_id}")
-            
-            return Order(
-                exchange=self.exchange_name,
+                
+                return Order(
+                    exchange=self.exchange_name,
                 order_id=order_id,
-                symbol=symbol,
-                side=side,
-                type='market',
+                    symbol=symbol,
+                    side=side,
+                    type='market',
                 price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 filled_quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 status='filled',
-                timestamp=datetime.now(),
-                commission=None,
-                commission_asset=None
-            )
+                    timestamp=datetime.now(),
+                    commission=None,
+                    commission_asset=None
+                )
         
         except Exception as e:
             logger.error(f"Error placing market order: {e}")
@@ -1961,7 +2077,7 @@ class GalaswapConnector(BaseExchange):
             
             # Use new V3 DEX endpoint: GET /v1/trade/positions
             try:
-                response = await self._make_unsigned_request(
+            response = await self._make_unsigned_request(
                     "GET",
                     f"/v1/trade/positions?user={gala_address_for_api}&limit=100",
                     None  # GET request, no body
