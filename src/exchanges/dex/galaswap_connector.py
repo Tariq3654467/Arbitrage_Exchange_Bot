@@ -1122,10 +1122,12 @@ class GalaswapConnector(BaseExchange):
                             ]
                             is_deprecated = any(dep in endpoint for dep in deprecated_endpoints)
                             
-                            # Check if this is a "pool not found" error (400) - not a failure, just missing pool
+                            # Check if this is a "pool not found" or "token ordering" error (400) - not a failure
                             is_pool_not_found = (
                                 response.status == 400 and 
-                                ("Pool data not found" in error_text or "pool" in error_text.lower())
+                                ("Pool data not found" in error_text or 
+                                 "Token0 must be smaller" in error_text or
+                                 "pool" in error_text.lower())
                             )
                             
                             if response.status == 404 and is_deprecated:
@@ -1230,6 +1232,21 @@ class GalaswapConnector(BaseExchange):
             base_token_key = token_class_to_composite_key(base_class)
             quote_token_key = token_class_to_composite_key(quote_class)
             
+            # IMPORTANT: GalaSwap API requires token0 to be lexicographically smaller than token1
+            # Compare the composite keys to determine correct order
+            if base_token_key > quote_token_key:
+                # Swap tokens: token0 must be smaller
+                token0_key = quote_token_key
+                token1_key = base_token_key
+                token0_class = quote_class
+                token1_class = base_class
+                # Note: This means we're querying the reverse pool
+            else:
+                token0_key = base_token_key
+                token1_key = quote_token_key
+                token0_class = base_class
+                token1_class = quote_class
+            
             # Try to get pool details first (need to know fee tier)
             # Common fee tiers: 500 (0.05%), 3000 (0.30%), 10000 (1.00%)
             fee_tiers = [3000, 500, 10000]  # Try standard fee tier first
@@ -1239,7 +1256,7 @@ class GalaswapConnector(BaseExchange):
                 try:
                     response = await self._make_unsigned_request(
                         "GET",
-                        f"/v1/trade/pool?token0={base_token_key}&token1={quote_token_key}&fee={fee}",
+                        f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
                     )
                     data = response.get("data", {})
@@ -1248,9 +1265,12 @@ class GalaswapConnector(BaseExchange):
                         break
                 except Exception as e:
                     error_msg = str(e)
-                    # "Pool not found" is expected for many pairs - don't log as error
+                    # "Pool not found" or "Token0 must be smaller" are expected for many pairs
                     if "Pool not found" in error_msg or "Pool data not found" in error_msg:
                         logger.debug(f"Pool not found for {symbol} with fee tier {fee} - this is expected for pairs without liquidity pools")
+                    elif "Token0 must be smaller" in error_msg:
+                        # This shouldn't happen now, but log it if it does
+                        logger.debug(f"Token ordering issue for {symbol} with fee tier {fee} (should be fixed)")
                     else:
                         logger.debug(f"Pool lookup failed for fee tier {fee}: {e}")
                     continue
@@ -1267,12 +1287,25 @@ class GalaswapConnector(BaseExchange):
                 )
             
             # Get current price using quote endpoint
+            # We want the price of base in terms of quote (how much quote for 1 base)
+            # So we need: tokenIn = quote, tokenOut = base
             try:
-                quote_response = await self._make_unsigned_request(
-                    "GET",
-                    f"/v1/trade/quote?tokenIn={quote_token_key}&tokenOut={base_token_key}&amountIn=1",
-                    None
-                )
+                # Determine which token is input/output based on the pool order
+                # We want to buy base with quote, so quote is input, base is output
+                if token0_key == base_token_key:
+                    # Base is token0, quote is token1 - to get base price: quote in, base out
+                    quote_response = await self._make_unsigned_request(
+                        "GET",
+                        f"/v1/trade/quote?tokenIn={token1_key}&tokenOut={token0_key}&amountIn=1",
+                        None
+                    )
+                else:
+                    # Base is token1, quote is token0 - to get base price: quote in, base out
+                    quote_response = await self._make_unsigned_request(
+                        "GET",
+                        f"/v1/trade/quote?tokenIn={token0_key}&tokenOut={token1_key}&amountIn=1",
+                        None
+                    )
                 quote_data = quote_response.get("data", {})
                 if quote_data:
                     amount_in = float(quote_data.get("amountIn", 0))
@@ -1468,31 +1501,80 @@ class GalaswapConnector(BaseExchange):
                 gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
             
             # OLD API endpoint (deprecated - returns 404)
-            # TODO: Find new balance endpoint in V3 DEX API
-            # For now, try the old endpoint but handle 404 gracefully
+            # Try old endpoint first, then try alternative approaches
+            balance_data = None
             try:
                 response = await self._make_unsigned_request(
                     "POST",
                     "/galachain/api/asset/token-contract/FetchBalances",
                     {"owner": gala_address_for_api}
                 )
+                balance_data = response.get("Data", [])
             except Exception as e:
                 error_msg = str(e)
-                # If it's a 404, the endpoint is deprecated - don't record as failure
+                # If it's a 404, the endpoint is deprecated - try alternative approach
                 if "404" in error_msg or "Cannot POST" in error_msg:
                     logger.debug(
                         f"GalaSwap balance endpoint deprecated (404). "
-                        f"New V3 DEX API may have different balance endpoint. "
-                        f"Returning empty balances."
+                        f"Trying to infer balances from positions..."
                     )
-                    # Don't record 404 as failure - endpoint is deprecated
-                    return {}
+                    # Try to get balances from positions (liquidity positions may have token info)
+                    # This is a workaround - positions don't show all balances, only liquidity
+                    try:
+                        positions_response = await self._make_unsigned_request(
+                            "GET",
+                            f"/v1/trade/positions?user={gala_address_for_api}&limit=100",
+                            None
+                        )
+                        positions_data = positions_response.get("data", {})
+                        positions = positions_data.get("Data", {}).get("positions", []) if isinstance(positions_data, dict) else []
+                        
+                        # Extract token balances from positions (limited - only shows tokens in positions)
+                        # This won't show all balances, but it's better than nothing
+                        balance_data = []
+                        seen_tokens = set()
+                        for position in positions:
+                            token0 = position.get("token0ClassKey", {})
+                            token1 = position.get("token1ClassKey", {})
+                            
+                            # Add token0 if not seen
+                            token0_key = f"{token0.get('collection', '')}${token0.get('category', '')}${token0.get('type', '')}${token0.get('additionalKey', '')}"
+                            if token0_key and token0_key not in seen_tokens:
+                                balance_data.append({
+                                    "tokenClass": token0,
+                                    "quantity": "0",  # Positions don't show available balance
+                                    "lockedHolds": []
+                                })
+                                seen_tokens.add(token0_key)
+                            
+                            # Add token1 if not seen
+                            token1_key = f"{token1.get('collection', '')}${token1.get('category', '')}${token1.get('type', '')}${token1.get('additionalKey', '')}"
+                            if token1_key and token1_key not in seen_tokens:
+                                balance_data.append({
+                                    "tokenClass": token1,
+                                    "quantity": "0",  # Positions don't show available balance
+                                    "lockedHolds": []
+                                })
+                                seen_tokens.add(token1_key)
+                        
+                        if balance_data:
+                            logger.debug(f"Inferred {len(balance_data)} tokens from positions (balances will be 0)")
+                        else:
+                            logger.debug("No positions found, cannot infer balances")
+                            return {}
+                    except Exception as pos_error:
+                        logger.debug(f"Could not get balances from positions: {pos_error}")
+                        return {}
                 else:
                     # Other errors - record as failure
                     raise
             
+            if not balance_data:
+                logger.debug("No token data returned from Galaswap balance API")
+                return {}
+            
             balances = {}
-            data = response.get("Data", [])
+            data = balance_data
             
             if not data:
                 logger.debug("No token data returned from Galaswap balance API")
