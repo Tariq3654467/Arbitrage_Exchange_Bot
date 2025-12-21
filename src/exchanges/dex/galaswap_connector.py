@@ -2077,9 +2077,9 @@ class GalaswapConnector(BaseExchange):
             
             # Use new V3 DEX endpoint: GET /v1/trade/positions
             try:
-            response = await self._make_unsigned_request(
+                response = await self._make_unsigned_request(
                     "GET",
-                    f"/v1/trade/positions?user={gala_address_for_api}&limit=100",
+                    f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
                     None  # GET request, no body
                 )
             except Exception as e:
