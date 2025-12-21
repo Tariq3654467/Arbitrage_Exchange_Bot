@@ -1122,6 +1122,12 @@ class GalaswapConnector(BaseExchange):
                             ]
                             is_deprecated = any(dep in endpoint for dep in deprecated_endpoints)
                             
+                            # Check if this is a "pool not found" error (400) - not a failure, just missing pool
+                            is_pool_not_found = (
+                                response.status == 400 and 
+                                ("Pool data not found" in error_text or "pool" in error_text.lower())
+                            )
+                            
                             if response.status == 404 and is_deprecated:
                                 # Deprecated endpoint - don't record as failure, just log and return
                                 logger.debug(
@@ -1131,6 +1137,15 @@ class GalaswapConnector(BaseExchange):
                                 )
                                 # Don't record 404 on deprecated endpoints as failure
                                 raise Exception(f"Deprecated endpoint (404): {endpoint} - Old API no longer available")
+                            
+                            if is_pool_not_found:
+                                # Pool doesn't exist - this is expected for many pairs, don't record as failure
+                                logger.debug(
+                                    f"GalaSwap pool not found (400): {endpoint}. "
+                                    f"This is expected for pairs that don't have liquidity pools on GalaSwap."
+                                )
+                                # Don't record 400 "pool not found" as failure
+                                raise Exception(f"Pool not found (400): {endpoint} - Pool does not exist")
                             
                             # Log the actual error for debugging (especially important with new API URL)
                             logger.warning(
@@ -1146,8 +1161,8 @@ class GalaswapConnector(BaseExchange):
                                 raise Exception(f"API error {response.status}: Service temporarily unavailable - {error_text[:100]}")
                             else:
                                 # Other 4xx/5xx errors - log the actual error
-                                # Only record as failure if not a deprecated endpoint 404
-                                if not (response.status == 404 and is_deprecated):
+                                # Only record as failure if not a deprecated endpoint 404 or pool not found 400
+                                if not (response.status == 404 and is_deprecated) and not is_pool_not_found:
                                     self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
@@ -1232,7 +1247,12 @@ class GalaswapConnector(BaseExchange):
                     if pool_data:
                         break
                 except Exception as e:
-                    logger.debug(f"Pool not found for fee tier {fee}: {e}")
+                    error_msg = str(e)
+                    # "Pool not found" is expected for many pairs - don't log as error
+                    if "Pool not found" in error_msg or "Pool data not found" in error_msg:
+                        logger.debug(f"Pool not found for {symbol} with fee tier {fee} - this is expected for pairs without liquidity pools")
+                    else:
+                        logger.debug(f"Pool lookup failed for fee tier {fee}: {e}")
                     continue
             
             if not pool_data:
