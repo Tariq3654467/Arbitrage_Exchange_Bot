@@ -295,16 +295,22 @@ Signed requests require:
 5. **POST `/v1/trade/create-pool`**
    - Generate create pool operation payload
 
-### Bundle API (Execution) - ⚠️ NEED TO FIND
+### Bundle API (Execution) - ✅ FOUND
 
-**The bundle API endpoint for executing signed payloads is not documented yet.**
-
-After generating and signing a payload, it needs to be executed on a bundle API endpoint. Possible endpoints:
-- `/v1/trade/bundle` (trying this)
-- `/v1/bundle/execute` (trying this)
-- `/v1/trade/execute` (trying this)
-
-**Please check the full API documentation for the bundle execution endpoint.**
+**POST `/v1/trade/bundle`** ⭐ NEW
+- Execute a signed transaction bundle
+- Submit signed payloads for execution
+- **Request Body**:
+  ```json
+  {
+    "payload": { /* payload from /v1/trade/swap */ },
+    "type": "swap",
+    "signature": "base64_signature",
+    "user": "eth|address"
+  }
+  ```
+- **Response**: `{"status": 201, "data": {"data": "transaction-id", ...}}`
+- **Operation Types**: `"swap"`, `"addLiquidity"`, `"removeLiquidity"`, `"collect"`, `"createPool"`
 
 ### Old Endpoints (Deprecated - 404):
 - `/v1/FetchAvailableTokenSwaps` ❌

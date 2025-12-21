@@ -77,10 +77,11 @@ V3 uses fee tiers:
   - Step 3: Sign payload (using existing signing logic) ✅
   - Step 4: Execute on bundle API ⚠️ (trying multiple endpoints)
 
-### ⚠️ In Progress
-- [ ] **Bundle API Endpoint** - Need to find correct endpoint for executing signed payloads
-  - Trying: `/v1/trade/bundle`, `/v1/bundle/execute`, `/v1/trade/execute`
-  - **Action Required**: Check full API documentation for bundle execution endpoint
+### ✅ Completed (Bundle API)
+- [x] **Bundle API Endpoint** - Found and implemented ✅
+  - `POST /v1/trade/bundle` - Execute signed transaction bundles ✅
+  - Request format: `{payload, type, signature, user}` ✅
+  - Response includes transaction ID ✅
 
 ## Current Issues
 

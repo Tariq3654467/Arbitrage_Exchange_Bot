@@ -202,6 +202,55 @@ def deterministic_json_stringify(obj) -> str:
         return json.dumps(obj)
 
 
+def sign_payload_for_bundle(payload: dict, private_key: str) -> str:
+    """
+    Sign payload for bundle API execution.
+    Returns hex-encoded signature (r + s concatenated, 64 bytes = 128 hex chars).
+    
+    Args:
+        payload: Payload dictionary to sign
+        private_key: Private key in hex format (with or without 0x prefix)
+    
+    Returns:
+        Hex-encoded signature string (128 characters)
+    """
+    try:
+        # Stringify deterministically
+        string_to_sign = deterministic_json_stringify(payload)
+        
+        # Hash with keccak256
+        string_bytes = string_to_sign.encode('utf-8')
+        hash_bytes = keccak(string_bytes)
+        
+        # Sign with private key
+        if private_key.startswith('0x'):
+            private_key = private_key[2:]
+        
+        private_key_bytes = bytes.fromhex(private_key)
+        private_key_obj = keys.PrivateKey(private_key_bytes)
+        signature = private_key_obj.sign_msg_hash(hash_bytes)
+        
+        # Normalize signature (same as TypeScript version)
+        curve_n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        r_value = signature.r
+        s_value = signature.s
+        
+        # Normalize s if needed
+        half_n = curve_n // 2
+        if s_value > half_n:
+            s_value = curve_n - s_value
+        
+        # Convert to hex format (r + s concatenated, each 32 bytes = 64 hex chars)
+        r_hex = format(r_value, '064x')  # 64 hex chars (32 bytes)
+        s_hex = format(s_value, '064x')  # 64 hex chars (32 bytes)
+        
+        return r_hex + s_hex  # 128 hex characters total
+        
+    except Exception as e:
+        logger.error(f"Error signing payload for bundle: {e}")
+        raise Exception(f"Failed to sign payload for bundle: {e}")
+
+
 def sign_request_body(body: dict, private_key: str) -> str:
     """
     Sign request body using secp256k1 signature on keccak256 hash
@@ -1689,61 +1738,54 @@ class GalaswapConnector(BaseExchange):
             
             logger.info(f"Swap payload generated with uniqueKey: {unique_key[:30]}...")
             
-            # Step 3: Sign and execute payload
-            # The payload_data already contains all the swap parameters
-            # We need to sign it and execute on bundle API
-            # TODO: Find the bundle API endpoint for executing signed payloads
-            # For now, we'll try to execute the signed payload
-            # The bundle endpoint is likely: POST /v1/trade/bundle or /v1/bundle/execute
+            # Step 3: Sign and execute payload on bundle API
+            # Bundle API requires: payload, type, signature, user
+            # The payload_data from step 2 already contains all swap parameters including uniqueKey
             
-            # Sign the payload
-            signed_payload = payload_data.copy()
-            signed_payload["uniqueKey"] = unique_key
+            # Sign the payload (sign the payload_data object)
+            # Bundle API expects hex signature (r + s concatenated), not base64 DER
+            logger.debug("Signing swap payload for bundle execution...")
+            signature = sign_payload_for_bundle(payload_data, self.private_key)
             
-            # Execute signed payload on bundle API
-            # NOTE: We need to find the correct bundle endpoint
-            # Trying common patterns:
-            bundle_endpoints = [
+            # Get user address in GalaChain format
+            user_address = getattr(self, 'wallet_address_for_api', self.wallet_address)
+            if user_address.startswith('0x') and '|' not in user_address:
+                user_address = f"eth|{user_address[2:]}"
+            
+            # Prepare bundle request
+            bundle_request = {
+                "payload": payload_data,  # The payload from /v1/trade/swap
+                "type": "swap",  # Operation type
+                "signature": signature,  # Signature of the payload
+                "user": user_address  # User address in eth| format
+            }
+            
+            logger.info(f"Executing swap bundle: type=swap, user={user_address[:30]}...")
+            
+            # Execute on bundle API (unsigned request - signature is in the body)
+            execution_result = await self._make_unsigned_request(
+                "POST",
                 "/v1/trade/bundle",
-                "/v1/bundle/execute",
-                "/v1/trade/execute"
-            ]
-            
-            execution_result = None
-            for bundle_endpoint in bundle_endpoints:
-                try:
-                    logger.debug(f"Trying bundle endpoint: {bundle_endpoint}")
-                    execution_result = await self._make_signed_request(
-                        "POST",
-                        bundle_endpoint,
-                        signed_payload
-                    )
-                    logger.info(f"Swap executed successfully via {bundle_endpoint}")
-                    break
-                except Exception as e:
-                    error_msg = str(e)
-                    if "404" not in error_msg and "Cannot" not in error_msg:
-                        # Real error, not just wrong endpoint
-                        raise
-                    logger.debug(f"Bundle endpoint {bundle_endpoint} not found: {e}")
-                    continue
-            
-            if not execution_result:
-                raise NotImplementedError(
-                    f"Could not find bundle API endpoint to execute swap. "
-                    f"Tried: {bundle_endpoints}. "
-                    f"Please check API documentation for the bundle execution endpoint."
-                )
+                bundle_request
+            )
             
             # Extract transaction/order ID from result
-            # The result structure may vary - try common fields
-            order_id = (
-                execution_result.get("data", {}).get("txid") or
-                execution_result.get("data", {}).get("transactionId") or
-                execution_result.get("txid") or
-                execution_result.get("transactionId") or
-                unique_key  # Fallback to uniqueKey
-            )
+            # Bundle API response format: {"status": 201, "data": {"data": "transaction-id", ...}}
+            bundle_data = execution_result.get("data", {})
+            if isinstance(bundle_data, dict):
+                order_id = (
+                    bundle_data.get("data") or  # Transaction ID from bundle
+                    bundle_data.get("transactionId") or
+                    bundle_data.get("txid") or
+                    unique_key  # Fallback to uniqueKey
+                )
+            else:
+                order_id = unique_key  # Fallback
+            
+            if not order_id:
+                order_id = unique_key
+            
+            logger.info(f"Swap executed successfully. Transaction ID: {order_id}")
             
             return Order(
                 exchange=self.exchange_name,
