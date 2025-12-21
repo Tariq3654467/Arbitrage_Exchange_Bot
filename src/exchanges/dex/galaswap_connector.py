@@ -1820,97 +1820,13 @@ class GalaswapConnector(BaseExchange):
         Trade execution for V3 DEX is not yet implemented.
         """
         # OLD API (deprecated): Swap-based endpoints return 404
+        # V3 DEX limit orders would need to be implemented using the swap payload API
+        # with price limits (sqrtPriceLimit parameter)
         raise NotImplementedError(
             f"GalaSwap limit orders not yet implemented for V3 DEX API. "
             f"Old swap-based endpoints are deprecated (404). "
             f"New V3 DEX execution endpoints need to be implemented."
         )
-        
-        # OLD CODE (deprecated - will never execute)
-        if False:
-            base_class, quote_class = self._parse_symbol(symbol)
-            
-            if side.lower() == 'buy':
-                # Find swaps at or below limit price
-                response = await self._make_unsigned_request(
-                    "POST",
-                    "/v1/FetchAvailableTokenSwaps",
-                    {
-                        "offeredTokenClass": base_class,
-                        "wantedTokenClass": quote_class
-                    }
-                )
-                
-                swaps = response.get("results", [])
-                suitable_swaps = []
-                
-                for swap in swaps:
-                    offered = swap.get("offered", [])
-                    wanted = swap.get("wanted", [])
-                    uses_available = int(swap.get("uses", 1)) - int(swap.get("usesSpent", 0))
-                    
-                    if offered and wanted and uses_available > 0:
-                        base_qty = float(offered[0].get("quantity", 0))
-                        quote_qty = float(wanted[0].get("quantity", 0))
-                        swap_price = quote_qty / base_qty if base_qty > 0 else float('inf')
-                        
-                        if swap_price <= price:
-                            suitable_swaps.append((swap, swap_price))
-                
-                if not suitable_swaps:
-                    raise ValueError(f"No swaps available at or below limit price {price}")
-                
-                # Use best (lowest) price swap
-                best_swap, best_price = min(suitable_swaps, key=lambda x: x[1])
-                
-                # Execute as market order
-                return await self.place_market_order(symbol, side, quantity)
-            
-            else:  # sell
-                # Create swap at limit price
-                quote_amount = quantity * price
-                
-                # Round quantities to 8 decimal places (GalaSwap API requirement)
-                body = {
-                    "offered": [{
-                        "quantity": format_quantity(quantity, decimals=8),
-                        "tokenInstance": {
-                            **base_class,
-                            "instance": "0"
-                        }
-                    }],
-                    "wanted": [{
-                        "quantity": format_quantity(quote_amount, decimals=8),
-                        "tokenInstance": {
-                            **quote_class,
-                            "instance": "0"
-                        }
-                    }],
-                    "uses": "1"
-                }
-                
-                result = await self._make_signed_request("POST", "/v1/RequestTokenSwap", body)
-                swap_data = result.get("Data", {})
-                swap_request_id = swap_data.get("swapRequestId", "")
-                
-                return Order(
-                    exchange=self.exchange_name,
-                    order_id=swap_request_id,
-                    symbol=symbol,
-                    side=side,
-                    type='limit',
-                    price=price,
-                    quantity=quantity,
-                    filled_quantity=0.0,
-                    status='pending',
-                    timestamp=datetime.now(),
-                    commission=None,
-                    commission_asset=None
-                )
-        
-        except Exception as e:
-            logger.error(f"Error placing limit order: {e}")
-            raise
     
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel a swap (terminate it)"""
