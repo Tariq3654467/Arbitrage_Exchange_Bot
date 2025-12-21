@@ -1253,8 +1253,8 @@ class GalaswapConnector(BaseExchange):
             
             pool_data = None
             for fee in fee_tiers:
-            try:
-                response = await self._make_unsigned_request(
+                try:
+                    response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
