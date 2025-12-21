@@ -309,6 +309,9 @@ def format_quantity(quantity: float, decimals: int = 8) -> str:
 class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
     
+    # API Base URL - can be overridden via environment variable GALASWAP_API_BASE_URL
+    # Default: https://api-galaswap.gala.com (backend API)
+    # Note: https://swap.gala.com/ is the frontend website, not the API endpoint
     API_BASE_URL = "https://api-galaswap.gala.com"
     REQUEST_TIMEOUT = 10  # seconds (increased for signed requests)
     SIGNED_REQUEST_TIMEOUT = 30  # seconds (longer timeout for order execution)
@@ -1691,8 +1694,15 @@ class GalaswapConnector(BaseExchange):
             
             swaps = response.get("Data", {}).get("results", [])
             
+            # Normalize order_id for comparison (remove null bytes and whitespace)
+            order_id_normalized = order_id.replace('\x00', '').strip() if isinstance(order_id, str) else str(order_id).replace('\x00', '').strip()
+            
             for swap in swaps:
-                if swap.get("swapRequestId") == order_id:
+                swap_id = swap.get("swapRequestId", "")
+                # Normalize swap ID for comparison
+                swap_id_normalized = swap_id.replace('\x00', '').strip() if isinstance(swap_id, str) else str(swap_id).replace('\x00', '').strip()
+                
+                if swap_id_normalized == order_id_normalized or swap_id == order_id:
                     uses = int(swap.get("uses", 1))
                     uses_spent = int(swap.get("usesSpent", 0))
                     
