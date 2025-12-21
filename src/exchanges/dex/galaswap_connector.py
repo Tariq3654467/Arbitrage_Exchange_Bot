@@ -404,15 +404,18 @@ class GalaswapConnector(BaseExchange):
             ) from e
         
         # Derive Ethereum address from private key (this is the authoritative address)
+        # GalaChain uses Ethereum-compatible addresses, so we derive the Ethereum address
         derived_ethereum_address = self.account.address
         
         # Store both addresses
         self.ethereum_address = derived_ethereum_address  # For reference
         self.gala_address = wallet_address  # Original address (may be different)
         
-        # IMPORTANT: Always use the address derived from the private key for API calls
+        # IMPORTANT: GalaChain supports both Ethereum-compatible and native addresses
+        # - Ethereum addresses: Use with "eth|" prefix (e.g., "eth|a7027114A40d21382951b03e3067429106e6e806")
+        # - GalaChain native: Use with "client|" prefix (e.g., "client|123456789abcdef012345678")
         # The API verifies that the signature matches the address in X-Wallet-Address header
-        # If the configured address doesn't match the private key, signature validation will fail
+        # We MUST use the address that corresponds to the private key
         
         # Check if provided address matches derived address
         provided_address_clean = wallet_address.replace('eth|', '').replace('client|', '').replace('0x', '').lower()
@@ -421,26 +424,32 @@ class GalaswapConnector(BaseExchange):
         if provided_address_clean == derived_address_clean:
             # Addresses match - use provided format (may have eth| or client| prefix)
             if '|' in wallet_address:
+                # Already in GalaChain format (eth| or client|)
                 self.wallet_address_for_api = wallet_address
+                logger.info(f"✓ Using GalaChain address format: {wallet_address[:30]}...")
             elif wallet_address.startswith('0x'):
-                # Convert to eth| format for GalaChain API
+                # Ethereum address - convert to eth| format for GalaChain API
                 self.wallet_address_for_api = f"eth|{wallet_address[2:]}"
+                logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
-                # Assume it's already in GalaChain format
+                # Assume it's already in GalaChain format (without prefix, might be client| format)
                 self.wallet_address_for_api = wallet_address
-            logger.info(f"✓ Wallet address matches private key: {wallet_address[:30]}...")
+                logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
+            # The error message will show which address the API expects
             logger.warning(
                 f"⚠️  WARNING: Configured wallet address '{wallet_address[:20]}...' does NOT match "
-                f"private key's derived address '{derived_ethereum_address[:20]}...'. "
+                f"private key's derived Ethereum address '{derived_ethereum_address[:20]}...'. "
                 f"This will cause signature errors! Using derived address instead."
             )
-            # Use derived address in eth| format (GalaChain API format)
+            # Use derived Ethereum address in eth| format (GalaChain API format for Ethereum addresses)
+            # This should match the address shown in error messages like:
+            # "DTO should be signed by a7027114A40d21382951b03e3067429106e6e806 private key"
             self.wallet_address_for_api = f"eth|{derived_ethereum_address[2:]}"
             logger.info(
-                f"✓ Using derived Ethereum address for API calls: eth|{derived_ethereum_address[2:30]}... "
-                f"(This should match the address in the error message)"
+                f"✓ Using derived Ethereum address for GalaChain API: eth|{derived_ethereum_address[2:30]}... "
+                f"(This should match the address in signature error messages)"
             )
         
         # Store provided public key if given, but we'll always try to fetch from API first
