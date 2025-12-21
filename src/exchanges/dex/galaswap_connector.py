@@ -400,33 +400,45 @@ class GalaswapConnector(BaseExchange):
                 f"Please ensure the private key is a valid Ethereum-compatible private key."
             ) from e
         
-        # Derive Ethereum address from private key (for reference)
+        # Derive Ethereum address from private key (this is the authoritative address)
         derived_ethereum_address = self.account.address
         
         # Store both addresses
         self.ethereum_address = derived_ethereum_address  # For reference
-        self.gala_address = wallet_address  # Original address
+        self.gala_address = wallet_address  # Original address (may be different)
         
-        # For GalaChain, use the original GalaChain address format (client|... or eth|...)
-        # GalaChain API expects the GalaChain address format, not Ethereum address
-        if '|' in wallet_address or not wallet_address.startswith('0x'):
-            logger.info(
-                f"GalaChain format detected: '{wallet_address[:30]}...'. "
-                f"Will use GalaChain address format for API calls (not Ethereum address)."
-            )
-            # Use GalaChain address format for API calls
-            self.wallet_address_for_api = wallet_address
-        elif wallet_address.lower() == derived_ethereum_address.lower():
-            # Ethereum address matches - use as-is
-            self.wallet_address_for_api = wallet_address
+        # IMPORTANT: Always use the address derived from the private key for API calls
+        # The API verifies that the signature matches the address in X-Wallet-Address header
+        # If the configured address doesn't match the private key, signature validation will fail
+        
+        # Check if provided address matches derived address
+        provided_address_clean = wallet_address.replace('eth|', '').replace('client|', '').replace('0x', '').lower()
+        derived_address_clean = derived_ethereum_address.replace('0x', '').lower()
+        
+        if provided_address_clean == derived_address_clean:
+            # Addresses match - use provided format (may have eth| or client| prefix)
+            if '|' in wallet_address:
+                self.wallet_address_for_api = wallet_address
+            elif wallet_address.startswith('0x'):
+                # Convert to eth| format for GalaChain API
+                self.wallet_address_for_api = f"eth|{wallet_address[2:]}"
+            else:
+                # Assume it's already in GalaChain format
+                self.wallet_address_for_api = wallet_address
+            logger.info(f"✓ Wallet address matches private key: {wallet_address[:30]}...")
         else:
-            # Address doesn't match - use provided address (might be GalaChain format)
+            # Addresses don't match - CRITICAL: Use derived address to fix signature errors
             logger.warning(
-                f"⚠️  WARNING: Wallet address '{wallet_address[:20]}...' does not match "
-                f"private key's derived Ethereum address '{derived_ethereum_address[:20]}...'. "
-                f"Using provided address (assuming GalaChain format)."
+                f"⚠️  WARNING: Configured wallet address '{wallet_address[:20]}...' does NOT match "
+                f"private key's derived address '{derived_ethereum_address[:20]}...'. "
+                f"This will cause signature errors! Using derived address instead."
             )
-            self.wallet_address_for_api = wallet_address
+            # Use derived address in eth| format (GalaChain API format)
+            self.wallet_address_for_api = f"eth|{derived_ethereum_address[2:]}"
+            logger.info(
+                f"✓ Using derived Ethereum address for API calls: eth|{derived_ethereum_address[2:30]}... "
+                f"(This should match the address in the error message)"
+            )
         
         # Store provided public key if given, but we'll always try to fetch from API first
         # The API public key is the authoritative source - it must match what's registered on GalaChain
@@ -752,7 +764,10 @@ class GalaswapConnector(BaseExchange):
         if wallet_address_for_header.startswith('0x') and '|' not in wallet_address_for_header:
             wallet_address_for_header = f"eth|{wallet_address_for_header[2:]}"
         headers["X-Wallet-Address"] = wallet_address_for_header
-        logger.debug(f"Using GalaChain wallet address in header: {wallet_address_for_header[:30]}...")
+        logger.info(
+            f"Using wallet address in X-Wallet-Address header: {wallet_address_for_header[:50]}... "
+            f"(Derived from private key: {self.ethereum_address[:20]}...)"
+        )
         
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
