@@ -1504,11 +1504,11 @@ class GalaswapConnector(BaseExchange):
             # Try old endpoint first, then try alternative approaches
             balance_data = None
             try:
-            response = await self._make_unsigned_request(
-                "POST",
-                "/galachain/api/asset/token-contract/FetchBalances",
-                {"owner": gala_address_for_api}
-            )
+                response = await self._make_unsigned_request(
+                    "POST",
+                    "/galachain/api/asset/token-contract/FetchBalances",
+                    {"owner": gala_address_for_api}
+                )
                 balance_data = response.get("Data", [])
             except Exception as e:
                 error_msg = str(e)

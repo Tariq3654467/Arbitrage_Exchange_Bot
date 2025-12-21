@@ -45,6 +45,15 @@ curl -X POST http://localhost:8000/api/trades/test \
     "trade_amount_usd": 5.0
   }'
 ```
+curl -X POST http://localhost:8000/api/trades/test \
+  -u admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "GALA/GUSDC",
+    "buy_exchange": "galaswap",
+    "sell_exchange": "galaswap",
+    "trade_amount_usd": 5.0
+  }'
 
 **Parameters:**
 - `symbol`: Trading pair (e.g., "GALA/GUSDC", "GUSDC/GALA")
