@@ -1165,7 +1165,7 @@ class GalaswapConnector(BaseExchange):
                                 # Other 4xx/5xx errors - log the actual error
                                 # Only record as failure if not a deprecated endpoint 404 or pool not found 400
                                 if not (response.status == 404 and is_deprecated) and not is_pool_not_found:
-                                self._record_failure()
+                                    self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
                         # Success - reset circuit breaker
