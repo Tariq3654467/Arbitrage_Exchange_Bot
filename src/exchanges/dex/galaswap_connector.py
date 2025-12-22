@@ -889,30 +889,29 @@ class GalaswapConnector(BaseExchange):
                             json={"user": gala_address_for_api},
                             headers={"Content-Type": "application/json"}
                         ) as response:
-                        if response.status in [404, 403]:
-                            # Endpoint deprecated (404) or forbidden (403) - try to derive public key or use provided one
-                            status_msg = "deprecated (404)" if response.status == 404 else "forbidden (403 - rate limiting/access restriction)"
-                            logger.warning(
-                                f"Public key endpoint {status_msg}. "
-                                f"Using derived public key (may cause signature errors if not registered)."
-                            )
-                            # Derive public key as fallback
-                            try:
-                                derived_pubkey = derive_compressed_public_key(self.private_key)
-                                self.public_key = derived_pubkey
-                                self._public_key_derived = True
+                            # Handle response statuses
+                            if response.status in [404, 403]:
+                                # Endpoint deprecated (404) or forbidden (403) - try to derive public key or use provided one
+                                status_msg = "deprecated (404)" if response.status == 404 else "forbidden (403 - rate limiting/access restriction)"
                                 logger.warning(
-                                    "⚠️ Using DERIVED public key - this may cause signature errors. "
-                                    "Public key should be fetched from API or provided in config."
+                                    f"Public key endpoint {status_msg}. "
+                                    f"Using derived public key (may cause signature errors if not registered)."
                                 )
-                            except Exception as derive_error:
-                                logger.error(f"Failed to derive public key: {derive_error}")
-                                raise Exception(
-                                    "Cannot get public key: API endpoint unavailable and derivation failed. "
-                                    "Please provide public key in configuration."
-                                )
-                                # Skip the rest of the public key fetching logic
-                                return
+                                # Derive public key as fallback
+                                try:
+                                    derived_pubkey = derive_compressed_public_key(self.private_key)
+                                    self.public_key = derived_pubkey
+                                    self._public_key_derived = True
+                                    logger.warning(
+                                        "⚠️ Using DERIVED public key - this may cause signature errors. "
+                                        "Public key should be fetched from API or provided in config."
+                                    )
+                                except Exception as derive_error:
+                                    logger.error(f"Failed to derive public key: {derive_error}")
+                                    raise Exception(
+                                        "Cannot get public key: API endpoint unavailable and derivation failed. "
+                                        "Please provide public key in configuration."
+                                    )
                             elif response.status == 200:
                                 data = await response.json()
                                 api_public_key = data.get("Data", {}).get("publicKey")
@@ -940,9 +939,9 @@ class GalaswapConnector(BaseExchange):
                                 try:
                                     error_data = await response.json()
                                     error_msg = error_data.get("Message", error_data.get("message", error_data.get("error", "Unknown error")))
-                                except:
+                                except Exception:
                                     error_msg = await response.text()
-                                
+
                                 logger.warning(
                                     f"Failed to fetch public key from API (status {response.status}): {error_msg}. "
                                     f"This is CRITICAL - public key must match what's registered on GalaChain."
@@ -954,6 +953,7 @@ class GalaswapConnector(BaseExchange):
                     logger.error(
                         f"❌ CRITICAL: Cannot connect to GalaChain API to fetch public key: {fetch_error}. "
                         f"Public key MUST be fetched from API to match your registered wallet. "
+               
                         f"Derived public keys will NOT work for GalaChain API."
                     )
                     raise Exception(
@@ -1469,9 +1469,9 @@ class GalaswapConnector(BaseExchange):
                             else:
                                 # Other 4xx/5xx errors - log the actual error
                                 # Only record as failure if not a deprecated endpoint 404, pool not found 400, or forbidden 403
-                                if not (response.status == 404 and is_deprecated) and not is_pool_not_found and not is_forbidden:
-                                self._record_failure()
-                                raise Exception(f"API error {response.status}: {error_text[:200]}")
+                                if not (response.status == 404 and is_deprecated) and not is_pool_not_found and not is_forbidden:#
+                                    self._record_failure()
+                                    raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
                         # Success - reset circuit breaker
                         self._record_success()
@@ -1558,8 +1558,8 @@ class GalaswapConnector(BaseExchange):
            
             pool_data = None
             for fee in fee_tiers:
-            try:
-                response = await self._make_unsigned_request(
+                try:
+                    response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
@@ -1877,7 +1877,7 @@ class GalaswapConnector(BaseExchange):
                
                 # Fallback 1: Try old endpoint (might still work in some cases)
                 try:
-            response = await self._make_unsigned_request(
+                    response = await self._make_unsigned_request(
                 "POST",
                 "/galachain/api/asset/token-contract/FetchBalances",
                 {"owner": gala_address_for_api}
@@ -2611,21 +2611,20 @@ class GalaswapConnector(BaseExchange):
             # Trust 201 response = filled (Virtual Ledger already updated)
             final_status = transaction_status  # Already set to 'filled' for 201 responses
             filled_qty = float(amount_out) if side.lower() == 'buy' else float(amount_in) if final_status == 'filled' else 0.0
-                
-                return Order(
-                    exchange=self.exchange_name,
+            return Order(
+                exchange=self.exchange_name,
                 order_id=order_id,
-                    symbol=symbol,
-                    side=side,
+                symbol=symbol,
+                side=side,
                 type='market',
-                    price=price,
+                price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 filled_quantity=filled_qty,
                 status=final_status,  # 'pending' or 'filled' based on verification
-                    timestamp=datetime.now(),
-                    commission=None,
-                    commission_asset=None
-                )
+                timestamp=datetime.now(),
+                commission=None,
+                commission_asset=None
+            )
         
         except Exception as e:
             logger.error(f"Error placing market order: {e}")
@@ -2730,7 +2729,7 @@ class GalaswapConnector(BaseExchange):
            
             # Use new V3 DEX endpoint: GET /v1/trade/positions
             try:
-            response = await self._make_unsigned_request(
+                response = await self._make_unsigned_request(
                     "GET",
                     f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
                     None  # GET request, no body
