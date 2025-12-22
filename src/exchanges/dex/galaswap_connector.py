@@ -2154,6 +2154,28 @@ class GalaswapConnector(BaseExchange):
             
             if response_error or (response_status and response_status not in [200, 201]):
                 error_details = execution_result.get("data", {})
+                error_text = str(error_details) if error_details else response_message
+                
+                # Check for signature validation errors
+                if "signature" in error_text.lower() and "invalid" in error_text.lower():
+                    raise ValueError(
+                        f"❌ SIGNATURE VALIDATION FAILED: Bundle API rejected transaction due to invalid signature. "
+                        f"This means the transaction will NOT execute. "
+                        f"Status: {response_status}, Message: {response_message}, "
+                        f"Details: {error_text}. "
+                        f"Please check: 1) Private key matches wallet address, 2) Signature format is correct, "
+                        f"3) Payload is signed correctly."
+                    )
+                
+                # Check for other validation errors
+                if "validation" in error_text.lower() or "invalid" in error_text.lower():
+                    raise ValueError(
+                        f"❌ TRANSACTION VALIDATION FAILED: Bundle API rejected transaction. "
+                        f"This means the transaction will NOT execute. "
+                        f"Status: {response_status}, Message: {response_message}, "
+                        f"Details: {error_text}"
+                    )
+                
                 raise ValueError(
                     f"Bundle API returned error: status={response_status}, "
                     f"message={response_message}, error={response_error}, "
@@ -2212,10 +2234,93 @@ class GalaswapConnector(BaseExchange):
             if not order_id:
                 order_id = unique_key
             
-            # Log final status
-            if transaction_status == 'pending':
+            # Verify transaction execution by checking balances
+            # This helps confirm if the transaction actually executed on-chain
+            logger.info(f"Verifying transaction execution for {order_id}...")
+            verified_execution = False
+            
+            try:
+                # Get token symbols for balance checking
+                token_in_symbol = token_in.get("collection", "").upper()
+                token_out_symbol = token_out.get("collection", "").upper()
+                
+                # Get initial balances
+                initial_balances = await self.get_balance()
+                initial_token_in = initial_balances.get(token_in_symbol, Balance(asset=token_in_symbol, free=0.0, locked=0.0)).free
+                initial_token_out = initial_balances.get(token_out_symbol, Balance(asset=token_out_symbol, free=0.0, locked=0.0)).free
+                
+                logger.debug(
+                    f"Initial balances - {token_in_symbol}: {initial_token_in}, "
+                    f"{token_out_symbol}: {initial_token_out}"
+                )
+                
+                # Wait a bit for transaction to process (bundle transactions may take a few seconds)
+                await asyncio.sleep(3)
+                
+                # Poll for balance changes (up to 30 seconds)
+                max_poll_attempts = 10
+                poll_interval = 3  # seconds
+                
+                for attempt in range(max_poll_attempts):
+                    await asyncio.sleep(poll_interval)
+                    
+                    # Get current balances
+                    current_balances = await self.get_balance()
+                    current_token_in = current_balances.get(token_in_symbol, Balance(asset=token_in_symbol, free=0.0, locked=0.0)).free
+                    current_token_out = current_balances.get(token_out_symbol, Balance(asset=token_out_symbol, free=0.0, locked=0.0)).free
+                    
+                    logger.debug(
+                        f"Poll attempt {attempt + 1}/{max_poll_attempts} - "
+                        f"{token_in_symbol}: {current_token_in}, "
+                        f"{token_out_symbol}: {current_token_out}"
+                    )
+                    
+                    # Check if balances changed as expected
+                    if side.lower() == 'buy':
+                        # Buying: should receive token_out (base), spend token_in (quote)
+                        expected_token_out_change = float(amount_out)
+                        token_out_change = current_token_out - initial_token_out
+                        if token_out_change >= expected_token_out_change * 0.95:  # 95% tolerance for rounding
+                            verified_execution = True
+                            logger.info(
+                                f"✓ Transaction verified! Balance change detected: "
+                                f"{token_out_symbol} increased by {token_out_change} "
+                                f"(expected ~{expected_token_out_change})"
+                            )
+                            break
+                    else:  # sell
+                        # Selling: should receive token_out (quote), spend token_in (base)
+                        expected_token_in_decrease = float(amount_in)
+                        token_in_decrease = initial_token_in - current_token_in
+                        if token_in_decrease >= expected_token_in_decrease * 0.95:  # 95% tolerance
+                            verified_execution = True
+                            logger.info(
+                                f"✓ Transaction verified! Balance change detected: "
+                                f"{token_in_symbol} decreased by {token_in_decrease} "
+                                f"(expected ~{expected_token_in_decrease})"
+                            )
+                            break
+                
+                if not verified_execution:
+                    logger.warning(
+                        f"⚠️ Could not verify transaction execution after {max_poll_attempts * poll_interval} seconds. "
+                        f"Transaction ID: {order_id}. "
+                        f"Balance changes not detected. Transaction may not have executed."
+                    )
+            except Exception as verify_error:
                 logger.warning(
-                    f"⚠️ Swap submitted to bundle API but execution NOT confirmed. "
+                    f"Error during transaction verification: {verify_error}. "
+                    f"Transaction ID: {order_id}. "
+                    f"Cannot confirm execution status."
+                )
+            
+            # Update transaction status based on verification
+            if verified_execution:
+                transaction_status = 'filled'
+                logger.info(f"✓✓ Transaction CONFIRMED executed on-chain. Transaction ID: {order_id}")
+            elif transaction_status == 'pending':
+                logger.warning(
+                    f"⚠️ Swap submitted to bundle API but execution NOT verified. "
                     f"Transaction ID: {order_id}. "
                     f"Status: {response_status}, Message: {response_message}. "
                     f"⚠️ IMPORTANT: Transaction may not have executed. Please verify on-chain!"
@@ -2227,7 +2332,10 @@ class GalaswapConnector(BaseExchange):
                 )
             
             # Return order with appropriate status
-            # If pending, filled_quantity should be 0 until confirmed
+            # Only mark as filled if verified or API confirmed execution
+            final_status = 'filled' if (verified_execution or transaction_status == 'filled') else 'pending'
+            filled_qty = float(amount_out) if side.lower() == 'buy' else float(amount_in) if final_status == 'filled' else 0.0
+            
             return Order(
                 exchange=self.exchange_name,
                 order_id=order_id,
@@ -2236,8 +2344,8 @@ class GalaswapConnector(BaseExchange):
                 type='market',
                 price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
-                filled_quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in) if transaction_status == 'filled' else 0.0,
-                status=transaction_status,  # 'pending' or 'filled' based on confirmation
+                filled_quantity=filled_qty,
+                status=final_status,  # 'pending' or 'filled' based on verification
                 timestamp=datetime.now(),
                 commission=None,
                 commission_asset=None
