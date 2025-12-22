@@ -2119,6 +2119,7 @@ class GalaswapConnector(BaseExchange):
             bundle_data = execution_result.get("data", {})
             
             # Check if transaction was actually submitted
+            transaction_status = 'pending'  # Default to pending until confirmed
             if isinstance(bundle_data, dict):
                 transaction_message = bundle_data.get("message", "")
                 transaction_id = (
@@ -2135,30 +2136,52 @@ class GalaswapConnector(BaseExchange):
                     f"Transaction ID: {transaction_id}"
                 )
                 
-                # Check if message indicates success
+                # Check if message indicates actual execution vs just received
                 if transaction_message and "received" in transaction_message.lower():
                     logger.warning(
-                        f"Bundle API returned 'received' status - transaction may not be executed yet. "
+                        f"⚠️ Bundle API returned 'received' status - transaction submitted but NOT confirmed executed. "
                         f"Transaction ID: {transaction_id}. "
-                        f"Please verify transaction on-chain."
+                        f"This may indicate the transaction was queued but not yet executed on-chain. "
+                        f"Please verify transaction status on-chain or check for errors."
                     )
-                elif transaction_message and "success" in transaction_message.lower():
-                    logger.info(f"Bundle API confirmed transaction execution: {transaction_id}")
+                    transaction_status = 'pending'  # Not confirmed executed
+                elif transaction_message and ("success" in transaction_message.lower() or "executed" in transaction_message.lower()):
+                    logger.info(f"✓ Bundle API confirmed transaction execution: {transaction_id}")
+                    transaction_status = 'filled'  # Confirmed executed
+                else:
+                    # Unknown status - default to pending
+                    logger.warning(
+                        f"⚠️ Bundle API returned unknown status message: '{transaction_message}'. "
+                        f"Transaction ID: {transaction_id}. "
+                        f"Assuming pending until confirmed."
+                    )
+                    transaction_status = 'pending'
                 
                 order_id = transaction_id
             else:
                 order_id = unique_key  # Fallback
                 logger.warning(f"Bundle API response format unexpected, using uniqueKey: {execution_result}")
+                transaction_status = 'pending'
             
             if not order_id:
                 order_id = unique_key
             
-            logger.info(
-                f"Swap submitted to bundle API. Transaction ID: {order_id}. "
-                f"Status: {response_status}, Message: {response_message}. "
-                f"Please verify transaction on-chain to confirm execution."
-            )
+            # Log final status
+            if transaction_status == 'pending':
+                logger.warning(
+                    f"⚠️ Swap submitted to bundle API but execution NOT confirmed. "
+                    f"Transaction ID: {order_id}. "
+                    f"Status: {response_status}, Message: {response_message}. "
+                    f"⚠️ IMPORTANT: Transaction may not have executed. Please verify on-chain!"
+                )
+            else:
+                logger.info(
+                    f"✓ Swap executed successfully. Transaction ID: {order_id}. "
+                    f"Status: {response_status}, Message: {response_message}."
+                )
             
+            # Return order with appropriate status
+            # If pending, filled_quantity should be 0 until confirmed
             return Order(
                 exchange=self.exchange_name,
                 order_id=order_id,
@@ -2167,8 +2190,8 @@ class GalaswapConnector(BaseExchange):
                 type='market',
                 price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
-                filled_quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
-                status='filled',
+                filled_quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in) if transaction_status == 'filled' else 0.0,
+                status=transaction_status,  # 'pending' or 'filled' based on confirmation
                 timestamp=datetime.now(),
                 commission=None,
                 commission_asset=None
@@ -2243,9 +2266,16 @@ class GalaswapConnector(BaseExchange):
             )
             
             if is_bundle_tx:
-                # This is a bundle transaction ID - swap executes immediately
-                # Bundle API already confirmed execution, so return 'filled' status
-                logger.debug(f"Order {order_id} is a bundle transaction - swap executed immediately, returning 'filled'")
+                # This is a bundle transaction ID
+                # NOTE: Bundle API returns "Transaction Received" which doesn't guarantee execution
+                # We need to verify the transaction actually executed on-chain
+                # For now, we can't verify without a transaction status endpoint, so return 'pending'
+                # The trade executor should handle this by checking balances or waiting for confirmation
+                logger.debug(
+                    f"Order {order_id} is a bundle transaction ID. "
+                    f"⚠️ Cannot verify execution status without transaction status endpoint. "
+                    f"Returning 'pending' status - transaction may or may not have executed."
+                )
                 return Order(
                     exchange=self.exchange_name,
                     order_id=order_id,
@@ -2254,8 +2284,8 @@ class GalaswapConnector(BaseExchange):
                     type='market',  # Bundle swaps are market orders
                     price=0.0,  # Would need to query transaction details
                     quantity=0.0,  # Would need to query transaction details
-                    filled_quantity=0.0,  # Would need to query transaction details
-                    status='filled',  # Bundle API confirmed execution
+                    filled_quantity=0.0,  # Cannot confirm without verification
+                    status='pending',  # ⚠️ Cannot verify execution - may not have executed
                     timestamp=datetime.now(),
                     commission=None,
                     commission_asset=None
