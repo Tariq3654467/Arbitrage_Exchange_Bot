@@ -58,15 +58,13 @@ exchanges:
     - name: galaswap
       enabled: true       # Enabled for Binance → Galaswap arbitrage
       chain: gala          # 'gala' for Gala Chain (recommended) or 'ethereum' if available
+      wallet_address: "eth|a7027114A40d21382951b03e3067429106e6e806"  # GalaChain wallet address
+      public_key: "qA2dNONkhkKvQsfnLOtWWqdTkqtVDSPajpYtlKm8mL6t9eS6rSaJCQ2JS1rqBi3EwppLRoq+eobEl8xcVlLa7Q=="  # Base64 public key (prevents 404 errors)
       router_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap router address
       factory_address: "0x0000000000000000000000000000000000000000"  # Update with actual Galaswap factory address
-      # CRITICAL: Provide PUBLIC_KEY to avoid 404 errors and signature failures
-      # The public key endpoint is deprecated (404). You MUST provide public_key in your config
-      # or environment variable GALASWAP_PUBLIC_KEY to prevent signature validation errors.
-      # Get your public key from Gala Games wallet or derive it from your private key.
-      # public_key: "YOUR_BASE64_PUBLIC_KEY_HERE"  # Uncomment and add your public key
       # Note: Galaswap runs on Gala Chain. Get contract addresses from Gala Games documentation.
       # You'll also need Gala Chain RPC URL and a wallet private key.
+      # CRITICAL: The public_key above prevents 404 errors from the deprecated public key endpoint.
 
 # ----- BLOCKCHAIN NETWORKS -----
 networks:
