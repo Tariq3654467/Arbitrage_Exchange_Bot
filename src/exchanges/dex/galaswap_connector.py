@@ -1873,11 +1873,11 @@ class GalaswapConnector(BaseExchange):
                 
                 # Fallback 1: Try old endpoint (might still work in some cases)
                 try:
-            response = await self._make_unsigned_request(
-                "POST",
-                "/galachain/api/asset/token-contract/FetchBalances",
-                {"owner": gala_address_for_api}
-            )
+                    response = await self._make_unsigned_request(
+                        "POST",
+                        "/galachain/api/asset/token-contract/FetchBalances",
+                        {"owner": gala_address_for_api}
+                    )
                     balance_data = response.get("Data", [])
                     logger.debug("Successfully fetched balances from old endpoint")
                 except Exception as old_error:
