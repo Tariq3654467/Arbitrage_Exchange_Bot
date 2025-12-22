@@ -1130,6 +1130,9 @@ class GalaswapConnector(BaseExchange):
                                  "pool" in error_text.lower())
                             )
                             
+                            # Check if this is a 403 Forbidden (rate limiting or access restriction) - not a failure
+                            is_forbidden = response.status == 403
+                            
                             if response.status == 404 and is_deprecated:
                                 # Deprecated endpoint - don't record as failure, just log and return
                                 logger.debug(
@@ -1149,6 +1152,15 @@ class GalaswapConnector(BaseExchange):
                                 # Don't record 400 "pool not found" as failure
                                 raise Exception(f"Pool not found (400): {endpoint} - Pool does not exist")
                             
+                            if is_forbidden:
+                                # 403 Forbidden - likely rate limiting or access restriction, don't record as failure
+                                logger.debug(
+                                    f"GalaSwap API access forbidden (403): {endpoint}. "
+                                    f"This may be due to rate limiting or API access restrictions."
+                                )
+                                # Don't record 403 as failure
+                                raise Exception(f"API access forbidden (403): {endpoint} - Rate limiting or access restriction")
+                            
                             # Log the actual error for debugging (especially important with new API URL)
                             logger.warning(
                                 f"Galaswap API error {response.status} for {endpoint}: "
@@ -1163,8 +1175,8 @@ class GalaswapConnector(BaseExchange):
                                 raise Exception(f"API error {response.status}: Service temporarily unavailable - {error_text[:100]}")
                             else:
                                 # Other 4xx/5xx errors - log the actual error
-                                # Only record as failure if not a deprecated endpoint 404 or pool not found 400
-                                if not (response.status == 404 and is_deprecated) and not is_pool_not_found:
+                                # Only record as failure if not a deprecated endpoint 404, pool not found 400, or forbidden 403
+                                if not (response.status == 404 and is_deprecated) and not is_pool_not_found and not is_forbidden:
                                     self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
@@ -2085,12 +2097,51 @@ class GalaswapConnector(BaseExchange):
     
     async def get_order_status(self, symbol: str, order_id: str) -> Order:
         """
-        Get order status using V3 DEX /v1/trade/positions endpoint
+        Get order status for GalaSwap V3 DEX
         
-        NOTE: V3 DEX uses positions instead of swaps. 
-        We search through user positions to find a matching order.
+        For swap transactions executed via bundle API:
+        - Bundle API returns transaction IDs (UUID format)
+        - Swaps execute immediately, so we return 'filled' status
+        
+        For liquidity positions:
+        - Uses /v1/trade/positions endpoint to check position status
         """
         try:
+            # Normalize order_id for comparison
+            order_id_normalized = order_id.replace('\x00', '').strip() if isinstance(order_id, str) else str(order_id).replace('\x00', '').strip()
+            
+            # Check if this is a bundle transaction ID (UUID format)
+            # Bundle transaction IDs are UUIDs like: "b960c27e-d3c1-40b2-acf5-45ffa3f7d5e0"
+            # or uniqueKeys like: "galaswap-operation-44d5d50a-d2..."
+            import re
+            uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            bundle_key_pattern = r'^galaswap-operation-[0-9a-f-]+$'
+            
+            is_bundle_tx = (
+                re.match(uuid_pattern, order_id_normalized, re.IGNORECASE) is not None or
+                re.match(bundle_key_pattern, order_id_normalized, re.IGNORECASE) is not None
+            )
+            
+            if is_bundle_tx:
+                # This is a bundle transaction ID - swap executes immediately
+                # Bundle API already confirmed execution, so return 'filled' status
+                logger.debug(f"Order {order_id} is a bundle transaction - swap executed immediately, returning 'filled'")
+                return Order(
+                    exchange=self.exchange_name,
+                    order_id=order_id,
+                    symbol=symbol,
+                    side='unknown',  # Can't determine from transaction ID alone
+                    type='market',  # Bundle swaps are market orders
+                    price=0.0,  # Would need to query transaction details
+                    quantity=0.0,  # Would need to query transaction details
+                    filled_quantity=0.0,  # Would need to query transaction details
+                    status='filled',  # Bundle API confirmed execution
+                    timestamp=datetime.now(),
+                    commission=None,
+                    commission_asset=None
+                )
+            
+            # For non-bundle IDs, check positions (liquidity positions)
             # Use GalaChain address format for API calls
             gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
             # Format Ethereum addresses with eth| prefix for GalaChain API
@@ -2129,9 +2180,6 @@ class GalaswapConnector(BaseExchange):
             data = response.get("data", {})
             positions_data = data.get("Data", {}) if isinstance(data, dict) else {}
             positions = positions_data.get("positions", [])
-            
-            # Normalize order_id for comparison (remove null bytes and whitespace)
-            order_id_normalized = order_id.replace('\x00', '').strip() if isinstance(order_id, str) else str(order_id).replace('\x00', '').strip()
             
             # Search for matching position by positionId
             for position in positions:
