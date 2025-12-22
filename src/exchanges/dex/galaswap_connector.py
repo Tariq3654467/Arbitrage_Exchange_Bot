@@ -30,6 +30,228 @@ from ...utils.logger import get_logger
 logger = get_logger()
 
 
+class VirtualLedger:
+    """
+    Virtual Ledger for tracking GalaSwap wallet balances locally.
+    
+    This addresses API limitations where balance endpoints return 403 errors
+    or only show liquidity positions. The ledger tracks balances based on
+    executed trades and initial balances from config.
+    """
+    
+    def __init__(self, wallet_address: str, ledger_file: Optional[str] = None):
+        """
+        Initialize Virtual Ledger
+        
+        Args:
+            wallet_address: Wallet address (used as key for ledger)
+            ledger_file: Optional path to JSON file for persistence
+        """
+        self.wallet_address = wallet_address
+        self.ledger_file = ledger_file or f"data/galaswap_ledger_{wallet_address.replace('|', '_').replace(':', '_')}.json"
+        self.balances: Dict[str, float] = {}  # Symbol -> balance (free)
+        self.locked: Dict[str, float] = {}  # Symbol -> locked balance
+        self._initialized = False
+        
+        # Ensure data directory exists
+        if self.ledger_file:
+            ledger_dir = os.path.dirname(self.ledger_file)
+            if ledger_dir:  # Only create directory if path includes a directory
+                os.makedirs(ledger_dir, exist_ok=True)
+    
+    def load_from_config(self, config: Dict) -> None:
+        """
+        Load initial balances from config's starting_balances section
+        
+        Args:
+            config: Configuration dictionary (from config.yaml)
+        """
+        try:
+            # Look for starting_balances in galaswap exchange config or root config
+            starting_balances = None
+            
+            # First, try to find galaswap-specific config
+            dex_exchanges = config.get("exchanges", {}).get("dex", [])
+            for dex_config in dex_exchanges:
+                if dex_config.get("name") == "galaswap" and "starting_balances" in dex_config:
+                    starting_balances = dex_config.get("starting_balances", {})
+                    break
+            
+            # If not found, try other locations
+            if not starting_balances:
+                starting_balances = (
+                    config.get("galaswap", {}).get("starting_balances", {}) or
+                    config.get("starting_balances", {})
+                )
+            
+            if starting_balances:
+                logger.info(f"Loading initial balances from config for wallet {self.wallet_address[:30]}...")
+                for symbol, balance_value in starting_balances.items():
+                    if isinstance(balance_value, (int, float)):
+                        self.balances[symbol.upper()] = float(balance_value)
+                        self.locked[symbol.upper()] = 0.0
+                    elif isinstance(balance_value, dict):
+                        self.balances[symbol.upper()] = float(balance_value.get("free", balance_value.get("balance", 0)))
+                        self.locked[symbol.upper()] = float(balance_value.get("locked", 0))
+                
+                logger.info(f"Loaded {len(self.balances)} initial balances from config")
+            else:
+                logger.debug("No starting_balances found in config, starting with empty ledger")
+        except Exception as e:
+            logger.warning(f"Error loading starting balances from config: {e}. Starting with empty ledger.")
+    
+    def load_from_file(self) -> bool:
+        """
+        Load balances from JSON file if it exists
+        
+        Returns:
+            True if file was loaded, False otherwise
+        """
+        if not self.ledger_file or not os.path.exists(self.ledger_file):
+            return False
+        
+        try:
+            with open(self.ledger_file, 'r') as f:
+                data = json.load(f)
+                self.balances = data.get("balances", {})
+                self.locked = data.get("locked", {})
+                logger.info(f"Loaded virtual ledger from {self.ledger_file}: {len(self.balances)} balances")
+                return True
+        except Exception as e:
+            logger.warning(f"Error loading virtual ledger from file: {e}")
+            return False
+    
+    def save_to_file(self) -> None:
+        """Save current balances to JSON file"""
+        if not self.ledger_file:
+            return
+        
+        try:
+            data = {
+                "wallet_address": self.wallet_address,
+                "last_updated": datetime.now().isoformat(),
+                "balances": self.balances,
+                "locked": self.locked
+            }
+            with open(self.ledger_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug(f"Saved virtual ledger to {self.ledger_file}")
+        except Exception as e:
+            logger.warning(f"Error saving virtual ledger to file: {e}")
+    
+    def update_balance(self, symbol: str, amount: float, is_locked: bool = False) -> None:
+        """
+        Update balance for a token
+        
+        Args:
+            symbol: Token symbol (e.g., "GALA", "GUSDC")
+            amount: Amount to add (positive) or subtract (negative)
+            is_locked: If True, update locked balance; otherwise update free balance
+        """
+        symbol = symbol.upper()
+        if is_locked:
+            self.locked[symbol] = self.locked.get(symbol, 0.0) + amount
+            if self.locked[symbol] < 0:
+                self.locked[symbol] = 0.0
+        else:
+            self.balances[symbol] = self.balances.get(symbol, 0.0) + amount
+            if self.balances[symbol] < 0:
+                self.balances[symbol] = 0.0
+        
+        self.save_to_file()
+    
+    def record_swap(self, token_in: str, amount_in: float, token_out: str, amount_out: float) -> None:
+        """
+        Record a swap transaction in the ledger
+        
+        Args:
+            token_in: Token being spent (symbol)
+            amount_in: Amount being spent (positive number)
+            token_out: Token being received (symbol)
+            amount_out: Amount being received (positive number)
+        """
+        logger.info(
+            f"📝 Virtual Ledger: Recording swap - "
+            f"Spending {amount_in} {token_in.upper()}, "
+            f"Receiving {amount_out} {token_out.upper()}"
+        )
+        
+        # Subtract spent token
+        self.update_balance(token_in, -amount_in, is_locked=False)
+        
+        # Add received token
+        self.update_balance(token_out, amount_out, is_locked=False)
+        
+        logger.debug(
+            f"Virtual Ledger updated - "
+            f"{token_in.upper()}: {self.balances.get(token_in.upper(), 0.0):.8f}, "
+            f"{token_out.upper()}: {self.balances.get(token_out.upper(), 0.0):.8f}"
+        )
+    
+    def get_balance(self, symbol: Optional[str] = None) -> Dict[str, Balance]:
+        """
+        Get balance(s) from virtual ledger
+        
+        Args:
+            symbol: Optional symbol to get specific balance, or None for all
+        
+        Returns:
+            Dictionary of Balance objects
+        """
+        balances = {}
+        
+        if symbol:
+            symbol = symbol.upper()
+            free = self.balances.get(symbol, 0.0)
+            locked = self.locked.get(symbol, 0.0)
+            if free > 0 or locked > 0:
+                balances[symbol] = Balance(
+                    asset=symbol,
+                    free=free,
+                    locked=locked
+                )
+        else:
+            # Return all balances
+            all_symbols = set(self.balances.keys()) | set(self.locked.keys())
+            for sym in all_symbols:
+                free = self.balances.get(sym, 0.0)
+                locked = self.locked.get(sym, 0.0)
+                if free > 0 or locked > 0:
+                    balances[sym] = Balance(
+                        asset=sym,
+                        free=free,
+                        locked=locked
+                    )
+        
+        return balances
+    
+    def get_balance_value(self, symbol: str) -> float:
+        """Get free balance for a specific symbol"""
+        return self.balances.get(symbol.upper(), 0.0)
+    
+    def initialize(self, config: Optional[Dict] = None) -> None:
+        """
+        Initialize ledger: load from file first, then from config if needed
+        
+        Args:
+            config: Optional config dictionary to load starting balances
+        """
+        if self._initialized:
+            return
+        
+        # Try to load from file first
+        loaded = self.load_from_file()
+        
+        # If file doesn't exist or is empty, load from config
+        if not loaded and config:
+            self.load_from_config(config)
+            if self.balances:
+                self.save_to_file()  # Save initial balances to file
+        
+        self._initialized = True
+        logger.info(f"Virtual Ledger initialized with {len(self.balances)} token balances")
+
+
 def derive_compressed_public_key(private_key: str) -> str:
     """
     Derive compressed public key from private key (base64 encoded)
@@ -517,7 +739,7 @@ class GalaswapConnector(BaseExchange):
             # Addresses match - use provided format (may have eth| or client| prefix)
             if '|' in wallet_address:
                 # Already in GalaChain format (eth| or client|)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using GalaChain address format: {wallet_address[:30]}...")
             elif wallet_address.startswith('0x'):
                 # Ethereum address - convert to eth| format for GalaChain API
@@ -525,7 +747,7 @@ class GalaswapConnector(BaseExchange):
                 logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
                 # Assume it's already in GalaChain format (without prefix, might be client| format)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
@@ -585,6 +807,14 @@ class GalaswapConnector(BaseExchange):
             "AXS": "Axie Infinity",
             "ENJ": "Enjin Coin",
         }
+        
+        # Initialize Virtual Ledger for balance tracking
+        # This addresses API limitations (403 errors, positions-only data)
+        self.virtual_ledger = VirtualLedger(
+            wallet_address=self.wallet_address_for_api,
+            ledger_file=None  # Will use default path
+        )
+        self._ledger_initialized = False
         
         logger.info(f"Initialized Galaswap connector for wallet: {wallet_address}")
     
@@ -653,10 +883,11 @@ class GalaswapConnector(BaseExchange):
                         json={"user": gala_address_for_api},
                         headers={"Content-Type": "application/json"}
                     ) as response:
-                        if response.status == 404:
-                            # Endpoint deprecated - try to derive public key or use provided one
+                        if response.status in [404, 403]:
+                            # Endpoint deprecated (404) or forbidden (403) - try to derive public key or use provided one
+                            status_msg = "deprecated (404)" if response.status == 404 else "forbidden (403 - rate limiting/access restriction)"
                             logger.warning(
-                                f"Public key endpoint deprecated (404). "
+                                f"Public key endpoint {status_msg}. "
                                 f"Using derived public key (may cause signature errors if not registered)."
                             )
                             # Derive public key as fallback
@@ -671,7 +902,7 @@ class GalaswapConnector(BaseExchange):
                             except Exception as derive_error:
                                 logger.error(f"Failed to derive public key: {derive_error}")
                                 raise Exception(
-                                    "Cannot get public key: API endpoint deprecated and derivation failed. "
+                                    "Cannot get public key: API endpoint unavailable and derivation failed. "
                                     "Please provide public key in configuration."
                                 )
                             # Skip the rest of the public key fetching logic
@@ -726,6 +957,30 @@ class GalaswapConnector(BaseExchange):
                 )
             except Exception as fetch_error:
                 error_msg = str(fetch_error)
+                # Check if it's a 403 error - treat as non-critical (rate limiting)
+                if "403" in error_msg or "forbidden" in error_msg.lower():
+                    logger.warning(
+                        f"Public key endpoint returned 403 (rate limiting/access restriction). "
+                        f"Using derived public key as fallback."
+                    )
+                    # Derive public key as fallback
+                    try:
+                        derived_pubkey = derive_compressed_public_key(self.private_key)
+                        self.public_key = derived_pubkey
+                        self._public_key_derived = True
+                        logger.warning(
+                            "⚠️  Using DERIVED public key due to API access restriction. "
+                            "This may cause signature errors if the derived key doesn't match registered key."
+                        )
+                        return  # Successfully derived, continue
+                    except Exception as derive_error:
+                        logger.error(f"Failed to derive public key: {derive_error}")
+                        raise Exception(
+                            "Cannot get public key: API access forbidden and derivation failed. "
+                            "Please provide public key in configuration or wait for rate limit to reset."
+                        )
+                else:
+                    # Other errors are still critical
                 logger.error(
                     f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
                     f"Public key MUST match what's registered with your wallet address."
@@ -735,7 +990,35 @@ class GalaswapConnector(BaseExchange):
                     f"This is required for GalaChain API authentication."
                 )
             
+            # Initialize Virtual Ledger if not already initialized
+            if not self._ledger_initialized:
+                try:
+                    # Try to load config for starting balances
+                    config_data = None
+                    try:
+                        import yaml
+                        config_path = os.getenv("CONFIG_PATH", "config/config.yaml")
+                        if os.path.exists(config_path):
+                            with open(config_path, 'r') as f:
+                                config_data = yaml.safe_load(f) or {}
+                            logger.debug(f"Loaded config from {config_path} for virtual ledger")
+                    except ImportError:
+                        logger.debug("yaml module not available, skipping config load for virtual ledger")
+                    except Exception as config_error:
+                        logger.debug(f"Could not load config for virtual ledger: {config_error}")
+                    
+                    # Initialize ledger (will load from file if exists, or from config)
+                    self.virtual_ledger.initialize(config=config_data)
+                    self._ledger_initialized = True
+                    logger.info(
+                        f"✓ Virtual Ledger initialized with {len(self.virtual_ledger.balances)} token balances. "
+                        f"Ledger file: {self.virtual_ledger.ledger_file}"
+                    )
+                except Exception as ledger_error:
+                    logger.warning(f"Could not initialize virtual ledger: {ledger_error}. Will continue without it.")
+            
             # Test connection by fetching balances (this will fail gracefully if wallet is empty)
+            # Use virtual ledger if available, otherwise try API
             try:
                 await self.get_balance()
                 logger.debug("Balance fetch successful during connection test")
@@ -1181,7 +1464,7 @@ class GalaswapConnector(BaseExchange):
                                 # Other 4xx/5xx errors - log the actual error
                                 # Only record as failure if not a deprecated endpoint 404, pool not found 400, or forbidden 403
                                 if not (response.status == 404 and is_deprecated) and not is_pool_not_found and not is_forbidden:
-                                    self._record_failure()
+                                self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
                         
                         # Success - reset circuit breaker
@@ -1269,8 +1552,8 @@ class GalaswapConnector(BaseExchange):
             
             pool_data = None
             for fee in fee_tiers:
-                try:
-                    response = await self._make_unsigned_request(
+            try:
+                response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
@@ -1502,11 +1785,33 @@ class GalaswapConnector(BaseExchange):
             }
     
     async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Balance]:
-        """Get account balance"""
+        """
+        Get account balance using Virtual Ledger (primary) or API (fallback)
+        
+        Virtual Ledger is used to track balances locally, addressing API limitations.
+        Balances are updated when trades execute (201 status from bundle API).
+        """
         try:
+            # PRIMARY: Use Virtual Ledger if initialized and has balances
+            if self._ledger_initialized and self.virtual_ledger.balances:
+                ledger_balances = self.virtual_ledger.get_balance(asset)
+                if ledger_balances:
+                    logger.debug(
+                        f"Using Virtual Ledger for balances: {len(ledger_balances)} tokens. "
+                        f"This avoids API rate limiting issues."
+                    )
+                    return ledger_balances
+                elif asset:
+                    # Specific asset requested but not in ledger - return empty
+                    logger.debug(f"Asset {asset} not found in Virtual Ledger")
+                    return {}
+            
+            # FALLBACK: Try API if ledger is empty or not initialized
             # Check circuit breaker first
             if not self._check_circuit_breaker():
-                # Circuit breaker is open - return empty balances
+                # Circuit breaker is open - try ledger, then return empty
+                if self._ledger_initialized:
+                    return self.virtual_ledger.get_balance(asset)
                 logger.debug("Circuit breaker open, returning empty balances")
                 return {}
             
@@ -1566,11 +1871,11 @@ class GalaswapConnector(BaseExchange):
                 
                 # Fallback 1: Try old endpoint (might still work in some cases)
                 try:
-                    response = await self._make_unsigned_request(
-                        "POST",
-                        "/galachain/api/asset/token-contract/FetchBalances",
-                        {"owner": gala_address_for_api}
-                    )
+            response = await self._make_unsigned_request(
+                "POST",
+                "/galachain/api/asset/token-contract/FetchBalances",
+                {"owner": gala_address_for_api}
+            )
                     balance_data = response.get("Data", [])
                     logger.debug("Successfully fetched balances from old endpoint")
                 except Exception as old_error:
@@ -1759,6 +2064,21 @@ class GalaswapConnector(BaseExchange):
                     logger.warning(f"Error parsing balance for token: {e}. Token data: {json.dumps(token_data, default=str)[:200]}")
                     continue
             
+            # Sync Virtual Ledger with API balances if we successfully fetched them
+            # This keeps the ledger up-to-date when API is available
+            if balance_data and self._ledger_initialized:
+                try:
+                    # Update ledger with fetched balances
+                    for symbol, balance_obj in balances.items():
+                        if isinstance(balance_obj, Balance):
+                            # Update ledger with API balance (this is authoritative when API works)
+                            self.virtual_ledger.balances[symbol] = balance_obj.free
+                            self.virtual_ledger.locked[symbol] = balance_obj.locked
+                    self.virtual_ledger.save_to_file()
+                    logger.debug("Synced Virtual Ledger with API balances")
+                except Exception as sync_error:
+                    logger.debug(f"Error syncing ledger with API balances: {sync_error}")
+            
             # Filter by asset if specified
             if asset:
                 return {asset: balances.get(asset)} if asset in balances else {}
@@ -1770,8 +2090,21 @@ class GalaswapConnector(BaseExchange):
                 f"Error fetching Galaswap balance for wallet {self.wallet_address}. "
                 f"Error type: {type(e).__name__}, Message: {str(e)}"
             )
-            logger.error(error_msg, exc_info=True)
-            # Return empty balances instead of raising to allow other exchanges to work
+            logger.warning(error_msg)
+            
+            # FALLBACK: Return Virtual Ledger balances if available
+            # This ensures the bot can continue operating even when API fails
+            if self._ledger_initialized and self.virtual_ledger.balances:
+                ledger_balances = self.virtual_ledger.get_balance(asset)
+                if ledger_balances:
+                    logger.info(
+                        f"Using Virtual Ledger balances as fallback (API failed). "
+                        f"Returning {len(ledger_balances)} token balances from ledger."
+                    )
+                    return ledger_balances
+            
+            # Return empty balances if ledger is also unavailable
+            logger.debug("No Virtual Ledger balances available, returning empty balances")
             return {}
     
     async def place_market_order(
@@ -1857,6 +2190,7 @@ class GalaswapConnector(BaseExchange):
             last_error = None
             retry_count = 0
             max_retries = 3  # Max retries for 403 errors
+            all_403_errors = True  # Track if all attempts result in 403
             
             for fee in fee_options:
                 try:
@@ -1884,11 +2218,11 @@ class GalaswapConnector(BaseExchange):
                             error_msg_retry = str(retry_error)
                             if "403" in error_msg_retry or "forbidden" in error_msg_retry.lower():
                                 if attempt < max_retries - 1:
-                                    # Exponential backoff: 1s, 2s, 4s
-                                    wait_time = 2 ** attempt
+                                    # Exponential backoff: 2s, 4s, 8s (longer delays for rate limiting)
+                                    wait_time = 2 ** (attempt + 1)  # 2, 4, 8 seconds
                                     logger.debug(
                                         f"403 error on quote attempt {attempt + 1}/{max_retries} for {symbol}. "
-                                        f"Waiting {wait_time}s before retry..."
+                                        f"Waiting {wait_time}s before retry (rate limiting)..."
                                     )
                                     await asyncio.sleep(wait_time)
                                     continue
@@ -1911,6 +2245,7 @@ class GalaswapConnector(BaseExchange):
                     
                     if quote_data and quote_data.get("amountIn") and quote_data.get("amountOut"):
                         selected_fee = fee if fee is not None else 3000  # Default to 3000 if no fee specified
+                        all_403_errors = False  # Reset - we got a successful response
                         logger.info(
                             f"Got quote for {symbol} with fee tier {selected_fee}: "
                             f"{quote_data.get('amountIn')} -> {quote_data.get('amountOut')}"
@@ -1929,12 +2264,13 @@ class GalaswapConnector(BaseExchange):
                         logger.debug(f"Token ordering issue for quote {symbol} with fee tier {fee}: {e}")
                     elif "403" in error_msg or "forbidden" in error_msg.lower():
                         # 403 error - rate limiting, add delay before trying next fee tier
+                        all_403_errors = True  # Track that we're getting 403 errors
                         logger.warning(
                             f"Quote failed for {symbol} with fee tier {fee} due to 403 (rate limiting). "
                             f"Will retry with next fee tier after delay..."
                         )
-                        # Add delay before trying next fee tier to avoid rate limits
-                        await asyncio.sleep(0.5)  # 500ms delay
+                        # Add longer delay before trying next fee tier to avoid rate limits
+                        await asyncio.sleep(2.0)  # 2 second delay to help with rate limiting
                     elif "400" in error_msg or "404" in error_msg:
                         logger.debug(f"Quote endpoint error for {symbol} with fee {fee}: {error_msg[:200]}")
                     else:
@@ -1943,12 +2279,24 @@ class GalaswapConnector(BaseExchange):
             
             if not quote_data:
                 error_details = f"Last error: {last_error}" if last_error else "No errors logged"
-                raise ValueError(
-                    f"Could not get quote for {symbol}. "
-                    f"No pool found or insufficient liquidity. "
-                    f"Tried fee tiers: {fee_options}. "
-                    f"{error_details}"
-                )
+                
+                # Check if all errors were 403 (rate limiting)
+                if last_error and ("403" in str(last_error) or "forbidden" in str(last_error).lower()):
+                    raise ValueError(
+                        f"❌ RATE LIMITING: Could not get quote for {symbol} due to API rate limiting (403 Forbidden). "
+                        f"All fee tiers returned 403 errors. "
+                        f"This indicates the API is blocking requests due to rate limits. "
+                        f"Please wait 5-10 minutes before retrying. "
+                        f"Tried fee tiers: {fee_options}. "
+                        f"Last error: {error_details}"
+                    )
+                else:
+                    raise ValueError(
+                        f"Could not get quote for {symbol}. "
+                        f"No pool found or insufficient liquidity. "
+                        f"Tried fee tiers: {fee_options}. "
+                        f"{error_details}"
+                    )
             
             # Extract amounts from quote
             if amount_in:
@@ -2139,7 +2487,7 @@ class GalaswapConnector(BaseExchange):
             
             # Execute on bundle API (unsigned request - signature is in the body)
             execution_result = await self._make_unsigned_request(
-                "POST",
+                    "POST",
                 "/v1/trade/bundle",
                 bundle_request
             )
@@ -2151,6 +2499,30 @@ class GalaswapConnector(BaseExchange):
             response_status = execution_result.get("status")
             response_message = execution_result.get("message", "")
             response_error = execution_result.get("error", False)
+            
+            # CRITICAL: Update Virtual Ledger when bundle API returns 201 (transaction submitted)
+            # This ensures balances are tracked locally even if API balance endpoints fail
+            if response_status in [200, 201] and not response_error:
+                if self._ledger_initialized:
+                    try:
+                        # Extract token symbols from token_in and token_out
+                        token_in_symbol = token_in.get("collection", "").upper()
+                        token_out_symbol = token_out.get("collection", "").upper()
+                        
+                        # Record swap in virtual ledger
+                        # When 201 is returned, the transaction is submitted and will execute
+                        self.virtual_ledger.record_swap(
+                            token_in=token_in_symbol,
+                            amount_in=float(amount_in),
+                            token_out=token_out_symbol,
+                            amount_out=float(amount_out)
+                        )
+                        logger.info(
+                            f"✓ Virtual Ledger updated: Spent {amount_in} {token_in_symbol}, "
+                            f"Received {amount_out} {token_out_symbol}"
+                        )
+                    except Exception as ledger_error:
+                        logger.warning(f"Error updating Virtual Ledger: {ledger_error}")
             
             if response_error or (response_status and response_status not in [200, 201]):
                 error_details = execution_result.get("data", {})
@@ -2288,7 +2660,7 @@ class GalaswapConnector(BaseExchange):
                                 f"(expected ~{expected_token_out_change})"
                             )
                             break
-                    else:  # sell
+            else:  # sell
                         # Selling: should receive token_out (quote), spend token_in (base)
                         expected_token_in_decrease = float(amount_in)
                         token_in_decrease = initial_token_in - current_token_in
@@ -2335,21 +2707,21 @@ class GalaswapConnector(BaseExchange):
             # Only mark as filled if verified or API confirmed execution
             final_status = 'filled' if (verified_execution or transaction_status == 'filled') else 'pending'
             filled_qty = float(amount_out) if side.lower() == 'buy' else float(amount_in) if final_status == 'filled' else 0.0
-            
-            return Order(
-                exchange=self.exchange_name,
+                
+                return Order(
+                    exchange=self.exchange_name,
                 order_id=order_id,
-                symbol=symbol,
-                side=side,
+                    symbol=symbol,
+                    side=side,
                 type='market',
-                price=price,
+                    price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 filled_quantity=filled_qty,
                 status=final_status,  # 'pending' or 'filled' based on verification
-                timestamp=datetime.now(),
-                commission=None,
-                commission_asset=None
-            )
+                    timestamp=datetime.now(),
+                    commission=None,
+                    commission_asset=None
+                )
         
         except Exception as e:
             logger.error(f"Error placing market order: {e}")
@@ -2454,7 +2826,7 @@ class GalaswapConnector(BaseExchange):
             
             # Use new V3 DEX endpoint: GET /v1/trade/positions
             try:
-                response = await self._make_unsigned_request(
+            response = await self._make_unsigned_request(
                     "GET",
                     f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
                     None  # GET request, no body
