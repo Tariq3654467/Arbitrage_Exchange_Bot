@@ -1745,6 +1745,8 @@ class GalaswapConnector(BaseExchange):
             # However, if the pool doesn't exist, the quote will fail
             
             # Determine tokenIn and tokenOut based on side
+            # Track which amount was originally specified (for API: exactly one must be provided)
+            use_amount_in = None  # Will be set based on side
             if side.lower() == 'buy':
                 # Buying base with quote: tokenIn = quote, tokenOut = base
                 token_in = quote_class
@@ -1754,6 +1756,7 @@ class GalaswapConnector(BaseExchange):
                 # We want to receive 'quantity' of base
                 amount_out = format_quantity(quantity, decimals=8)
                 amount_in = None  # Will get from quote
+                use_amount_in = False  # Use amountOut for buy orders
             else:  # sell
                 # Selling base for quote: tokenIn = base, tokenOut = quote
                 token_in = base_class
@@ -1763,6 +1766,7 @@ class GalaswapConnector(BaseExchange):
                 # We want to spend 'quantity' of base
                 amount_in = format_quantity(quantity, decimals=8)
                 amount_out = None  # Will get from quote
+                use_amount_in = True  # Use amountIn for sell orders
             
             # Log the quote request for debugging
             logger.debug(
@@ -1924,21 +1928,36 @@ class GalaswapConnector(BaseExchange):
                     sqrt_price_limit = "0.000000000000000001"
             
             # Calculate slippage protection (1% slippage tolerance)
-            amount_in_max = format_quantity(float(amount_in) * 1.01, decimals=8)  # 1% more
             # amountOutMinimum must be negative (API requirement)
             # It represents the minimum amount of output tokens we want to receive
-            amount_out_min = format_quantity(-abs(float(amount_out) * 0.99), decimals=8)  # 1% less, negative
             
+            # Build swap payload request - API requires exactly one of amountIn or amountOut
             swap_payload_request = {
                 "tokenIn": token_in,
                 "tokenOut": token_out,
-                "amountIn": amount_in,
-                "amountOut": amount_out,
                 "fee": selected_fee,
                 "sqrtPriceLimit": sqrt_price_limit,
-                "amountInMaximum": amount_in_max,
-                "amountOutMinimum": amount_out_min
             }
+            
+            # Include exactly one of amountIn or amountOut based on original specification
+            if use_amount_in:
+                # Sell order: we specified amountIn (spending base), so send only amountIn
+                swap_payload_request["amountIn"] = amount_in
+                # Calculate slippage protection for sell orders
+                amount_in_max = format_quantity(float(amount_in) * 1.01, decimals=8)  # 1% more
+                swap_payload_request["amountInMaximum"] = amount_in_max
+                # amountOutMinimum must be negative
+                amount_out_min = format_quantity(-abs(float(amount_out) * 0.99), decimals=8)  # 1% less, negative
+                swap_payload_request["amountOutMinimum"] = amount_out_min
+            else:
+                # Buy order: we specified amountOut (receiving base), so send only amountOut
+                swap_payload_request["amountOut"] = amount_out
+                # Calculate slippage protection for buy orders
+                amount_in_max = format_quantity(float(amount_in) * 1.01, decimals=8)  # 1% more
+                swap_payload_request["amountInMaximum"] = amount_in_max
+                # amountOutMinimum must be negative
+                amount_out_min = format_quantity(-abs(float(amount_out) * 0.99), decimals=8)  # 1% less, negative
+                swap_payload_request["amountOutMinimum"] = amount_out_min
             
             logger.info(f"Generating swap payload: {amount_in} {token_in['collection']} -> {amount_out} {token_out['collection']} (fee: {selected_fee})")
             
