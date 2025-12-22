@@ -206,11 +206,20 @@ class PortfolioManager:
     
     async def execute_rebalance(self) -> bool:
         """Execute portfolio rebalancing"""
-        # Check if enough time has passed since last rebalance
+        # CRITICAL FIX: Add 5-minute cooldown after rebalance attempts to prevent loops
+        # This prevents the bot from repeatedly trying to rebalance when balances haven't updated yet
         if self.last_rebalance_time:
             time_since_last = datetime.now() - self.last_rebalance_time
-            if time_since_last < timedelta(minutes=self.rebalance_interval_minutes):
-                logger.info("Rebalance skipped: Too soon since last rebalance")
+            # Use shorter cooldown (5 minutes) to prevent rebalance loops
+            # The Virtual Ledger updates immediately, but we still want a cooldown
+            cooldown_minutes = min(5, self.rebalance_interval_minutes)  # 5 min cooldown
+            if time_since_last < timedelta(minutes=cooldown_minutes):
+                remaining = (timedelta(minutes=cooldown_minutes) - time_since_last).total_seconds() / 60
+                logger.info(
+                    f"Rebalance skipped: Cooldown active. "
+                    f"Last rebalance was {time_since_last.total_seconds() / 60:.1f} minutes ago. "
+                    f"Wait {remaining:.1f} more minutes."
+                )
                 return False
         
         try:
