@@ -911,43 +911,43 @@ class GalaswapConnector(BaseExchange):
                                     "Cannot get public key: API endpoint unavailable and derivation failed. "
                                     "Please provide public key in configuration."
                                 )
-                            # Skip the rest of the public key fetching logic
-                            return
-                        elif response.status == 200:
-                            data = await response.json()
-                            api_public_key = data.get("Data", {}).get("publicKey")
-                            if api_public_key:
-                                # Use API public key - this is the one registered with your wallet
-                                self.public_key = api_public_key
-                                self._public_key_derived = False
-                                logger.info(
-                                    f"✓ Fetched public key from GalaChain API: "
-                                    f"length={len(self.public_key)}, "
-                                    f"preview={self.public_key[:30]}..."
-                                )
-                            else:
-                                logger.warning("Public key not found in API response Data field")
-                                # Try alternative response structure
-                                api_public_key = data.get("publicKey") or data.get("PublicKey")
+                                # Skip the rest of the public key fetching logic
+                                return
+                            elif response.status == 200:
+                                data = await response.json()
+                                api_public_key = data.get("Data", {}).get("publicKey")
                                 if api_public_key:
+                                    # Use API public key - this is the one registered with your wallet
                                     self.public_key = api_public_key
                                     self._public_key_derived = False
-                                    logger.info(f"✓ Found public key in alternative response field")
+                                    logger.info(
+                                        f"✓ Fetched public key from GalaChain API: "
+                                        f"length={len(self.public_key)}, "
+                                        f"preview={self.public_key[:30]}..."
+                                    )
                                 else:
-                                    raise Exception("Public key not found in API response")
-                        else:
-                            # Try to get error message from response
-                            try:
-                                error_data = await response.json()
-                                error_msg = error_data.get("Message", error_data.get("message", error_data.get("error", "Unknown error")))
-                            except:
-                                error_msg = await response.text()
-                            
-                            logger.warning(
-                                f"Failed to fetch public key from API (status {response.status}): {error_msg}. "
-                                f"This is CRITICAL - public key must match what's registered on GalaChain."
-                            )
-                            raise Exception(f"API returned status {response.status}: {error_msg}")
+                                    logger.warning("Public key not found in API response Data field")
+                                    # Try alternative response structure
+                                    api_public_key = data.get("publicKey") or data.get("PublicKey")
+                                    if api_public_key:
+                                        self.public_key = api_public_key
+                                        self._public_key_derived = False
+                                        logger.info(f"✓ Found public key in alternative response field")
+                                    else:
+                                        raise Exception("Public key not found in API response")
+                            else:
+                                # Try to get error message from response
+                                try:
+                                    error_data = await response.json()
+                                    error_msg = error_data.get("Message", error_data.get("message", error_data.get("error", "Unknown error")))
+                                except:
+                                    error_msg = await response.text()
+                                
+                                logger.warning(
+                                    f"Failed to fetch public key from API (status {response.status}): {error_msg}. "
+                                    f"This is CRITICAL - public key must match what's registered on GalaChain."
+                                )
+                                raise Exception(f"API returned status {response.status}: {error_msg}")
                             
                 except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
                     # Network errors - this is critical, we need the API public key
