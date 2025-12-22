@@ -253,17 +253,17 @@ def derive_compressed_public_key(private_key: str) -> str:
     """
     Derive compressed public key from private key (base64 encoded)
     Same as TypeScript: ethers.SigningKey.computePublicKey(privateKey, true)
-   
+    
     Args:
         private_key: Private key in hex format (with or without 0x prefix)
-   
+    
     Returns:
         Base64 encoded compressed public key
     """
     # Clean private key
     private_key_clean = private_key[2:] if private_key.startswith('0x') else private_key
     private_key_bytes = bytes.fromhex(private_key_clean)
-   
+    
     # Method 1: Try eth_keys with compressed parameter (newer versions)
     try:
         private_key_obj = keys.PrivateKey(private_key_bytes)
@@ -275,7 +275,7 @@ def derive_compressed_public_key(private_key: str) -> str:
             pass  # Fall through to manual construction
     except Exception as e:
         logger.debug(f"eth_keys method failed: {e}, trying alternatives...")
-   
+    
     # Method 2: Try ecdsa library directly (most reliable, if available)
     if ECDSA_AVAILABLE:
         try:
@@ -308,29 +308,29 @@ def derive_compressed_public_key(private_key: str) -> str:
                         y = int.from_bytes(y_bytes, 'big')
                     else:
                         raise ValueError("Could not extract coordinates from ecdsa public key")
-           
+            
             # Convert x to 32-byte big-endian
             x_bytes = x.to_bytes(32, 'big')
-           
+            
             # Determine prefix: 0x02 if y is even, 0x03 if y is odd
             y_int = int(y)
             prefix = 0x02 if (y_int % 2 == 0) else 0x03
-           
+            
             # Construct compressed public key: prefix + x coordinate
             public_key_bytes = bytes([prefix]) + x_bytes
             return base64.b64encode(public_key_bytes).decode('utf-8')
         except Exception as e:
             logger.debug(f"ecdsa method failed: {e}, trying eth_keys manual method...")
-   
+    
     # Method 3: Manual construction using eth_keys (fallback)
     try:
         private_key_obj = keys.PrivateKey(private_key_bytes)
         public_key_obj = private_key_obj.public_key
-       
+        
         # Try different methods to get x, y coordinates
         x = None
         y = None
-       
+        
         # Method 3a: Try to_point() (some versions)
         try:
             point = public_key_obj.to_point()
@@ -346,7 +346,7 @@ def derive_compressed_public_key(private_key: str) -> str:
                 # Method 3c: Use to_bytes() and extract from uncompressed format
                 uncompressed = public_key_obj.to_bytes()
                 logger.debug(f"Uncompressed public key length: {len(uncompressed)}, first byte: {hex(uncompressed[0]) if len(uncompressed) > 0 else 'N/A'}")
-               
+                
                 # Handle different formats
                 if len(uncompressed) == 65 and uncompressed[0] == 0x04:
                     # Standard uncompressed format: 0x04 + 32 bytes x + 32 bytes y
@@ -368,21 +368,21 @@ def derive_compressed_public_key(private_key: str) -> str:
                         f"Unexpected public key format: length={len(uncompressed)}, "
                         f"first_byte={hex(uncompressed[0]) if len(uncompressed) > 0 else 'N/A'}"
                     )
-       
+        
         if x is None or y is None:
             raise ValueError("Could not extract x, y coordinates from public key")
-       
+        
         # Convert x to 32-byte big-endian
         x_bytes = x.to_bytes(32, 'big')
-       
+        
         # Determine prefix: 0x02 if y is even, 0x03 if y is odd
         y_int = int(y)
         prefix = 0x02 if (y_int % 2 == 0) else 0x03
-       
+        
         # Construct compressed public key: prefix + x coordinate
         public_key_bytes = bytes([prefix]) + x_bytes
         return base64.b64encode(public_key_bytes).decode('utf-8')
-   
+    
     except Exception as e:
         error_msg = f"Failed to derive compressed public key: {e}"
         logger.error(error_msg)
@@ -473,64 +473,64 @@ def sign_payload_for_bundle(payload: dict, private_key: str) -> str:
 def sign_request_body(body: dict, private_key: str) -> str:
     """
     Sign request body using secp256k1 signature on keccak256 hash
-   
+    
     Args:
         body: Request body dictionary
         private_key: Private key in hex format (with or without 0x prefix)
-   
+    
     Returns:
         Base64 encoded signature
     """
     try:
         # Remove signature if present
         body_to_sign = {k: v for k, v in body.items() if k != 'signature'}
-       
+        
         # Stringify deterministically
         string_to_sign = deterministic_json_stringify(body_to_sign)
-       
+        
         # Hash with keccak256
         string_bytes = string_to_sign.encode('utf-8')
         hash_bytes = keccak(string_bytes)
-       
+        
         # Sign with private key
         if private_key.startswith('0x'):
             private_key = private_key[2:]
-       
+        
         private_key_bytes = bytes.fromhex(private_key)
         private_key_obj = keys.PrivateKey(private_key_bytes)
         signature = private_key_obj.sign_msg_hash(hash_bytes)
-       
+        
         # Normalize signature (same as TypeScript version)
         # If s > n/2, use n - s (this is required for GalaSwap API)
         # secp256k1 curve order n (constant)
         # 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
         curve_n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-       
+        
         # Normalize s if needed (same logic as TypeScript)
         r_value = signature.r
         s_value = signature.s
-       
+        
         # Check if s > n/2 and normalize (same as TypeScript: signature.s.cmp(ecSecp256k1.curve.n.shrn(1)) > 0)
         half_n = curve_n // 2
         if s_value > half_n:
             s_value = curve_n - s_value
             logger.debug(f"Normalized signature s value (was > n/2)")
-       
+        
         # Convert to DER format and base64 encode
         # Proper DER encoding for ECDSA signature
         r_bytes = r_value.to_bytes(32, 'big')
         s_bytes = s_value.to_bytes(32, 'big')
-       
+        
         # Remove leading zeros
         r_bytes = r_bytes.lstrip(b'\x00')
         s_bytes = s_bytes.lstrip(b'\x00')
-       
+        
         # Ensure first byte is < 0x80 (DER requirement for positive integers)
         if len(r_bytes) > 0 and r_bytes[0] & 0x80:
             r_bytes = b'\x00' + r_bytes
         if len(s_bytes) > 0 and s_bytes[0] & 0x80:
             s_bytes = b'\x00' + s_bytes
-       
+        
         # DER encoding: SEQUENCE { INTEGER r, INTEGER s }
         # Build INTEGER r
         int_r = b'\x02' + bytes([len(r_bytes)]) + r_bytes
@@ -548,9 +548,9 @@ def sign_request_body(body: dict, private_key: str) -> str:
                 length_bytes.insert(0, temp & 0xff)
                 temp >>= 8
             der = b'\x30' + bytes([0x80 | len(length_bytes)]) + bytes(length_bytes) + int_r + int_s
-       
+        
         return base64.b64encode(der).decode('utf-8')
-   
+    
     except Exception as e:
         logger.error(f"Error signing request: {e}")
         raise
@@ -613,7 +613,7 @@ def format_quantity(quantity: float, decimals: int = 8) -> str:
 
 class GalaswapConnector(BaseExchange):
     """Galaswap exchange connector using GalaConnect API"""
-   
+    
     # API Base URL - can be overridden via environment variable GALASWAP_API_BASE_URL
     # Updated to new backend URL: https://dex-backend-prod1.defi.gala.com/
     # Previous URL: https://api-galaswap.gala.com (may still work but new URL is preferred)
@@ -628,11 +628,11 @@ class GalaswapConnector(BaseExchange):
     SIGNED_REQUEST_TIMEOUT = 30  # seconds (longer timeout for order execution)
     MAX_RETRIES = 3  # Increased retries for better reliability
     RETRY_DELAY_BASE = 2  # seconds (increased delay between retries)
-   
+    
     # Circuit breaker: disable after consecutive failures
     _circuit_breaker_threshold = 10  # Disable after 10 consecutive failures (less aggressive)
     _circuit_breaker_reset_time = 180  # Re-enable after 3 minutes (faster recovery)
-   
+    
     def __init__(
         self,
         wallet_address: str,
@@ -642,7 +642,7 @@ class GalaswapConnector(BaseExchange):
     ):
         """
         Initialize Galaswap connector
-       
+        
         Args:
             wallet_address: GalaChain wallet address (e.g., "client|123456789abcdef012345678")
             private_key: Private key in hex format
@@ -650,15 +650,15 @@ class GalaswapConnector(BaseExchange):
             rpc_url: Not used, kept for compatibility
         """
         BaseExchange.__init__(self, exchange_name="galaswap", testnet=False)
-       
+        
         # Validate wallet address format
         if not wallet_address or not isinstance(wallet_address, str):
             raise ValueError("Wallet address is required and must be a string")
-       
+        
         wallet_address = wallet_address.strip()
         if not wallet_address:
             raise ValueError("Wallet address cannot be empty")
-       
+        
         # Gala wallet addresses typically have format: "client|..." or just an address
         # Log format for debugging
         if '|' in wallet_address:
@@ -667,26 +667,26 @@ class GalaswapConnector(BaseExchange):
             logger.debug(f"Gala wallet address format detected: Ethereum-style address")
         else:
             logger.debug(f"Gala wallet address format: {wallet_address[:20]}...")
-       
+        
         self.wallet_address = wallet_address
         self.private_key = private_key
-       
+        
         # Validate and initialize account for key operations
         if not private_key or not isinstance(private_key, str):
             raise ValueError("Private key is required and must be a string")
-       
+        
         # Remove whitespace
         private_key = private_key.strip()
-       
+        
         if not private_key:
             raise ValueError("Private key cannot be empty")
-       
+        
         # Remove 0x prefix if present
         if private_key.startswith('0x'):
             private_key_clean = private_key[2:]
         else:
             private_key_clean = private_key
-       
+        
         # Validate hex format
         try:
             # Check if it's valid hex
@@ -697,14 +697,14 @@ class GalaswapConnector(BaseExchange):
                 f"Private key must be 64 hex characters (with or without 0x prefix). "
                 f"Got: {private_key[:10]}..." if len(private_key) > 10 else private_key
             )
-       
+        
         # Check length (should be 64 hex chars = 32 bytes)
         if len(private_key_clean) != 64:
             raise ValueError(
                 f"Invalid private key length: expected 64 hex characters (32 bytes), "
                 f"got {len(private_key_clean)} characters"
             )
-       
+        
         # Initialize account
         try:
             self.account = Account.from_key('0x' + private_key_clean)
@@ -713,11 +713,11 @@ class GalaswapConnector(BaseExchange):
                 f"Failed to create account from private key: {str(e)}. "
                 f"Please ensure the private key is a valid Ethereum-compatible private key."
             ) from e
-       
+        
         # Derive Ethereum address from private key (this is the authoritative address)
         # GalaChain uses Ethereum-compatible addresses, so we derive the Ethereum address
         derived_ethereum_address = self.account.address
-       
+        
         # Store both addresses
         self.ethereum_address = derived_ethereum_address  # For reference
         self.gala_address = wallet_address  # Original address (may be different)
@@ -736,7 +736,7 @@ class GalaswapConnector(BaseExchange):
             # Addresses match - use provided format (may have eth| or client| prefix)
             if '|' in wallet_address:
                 # Already in GalaChain format (eth| or client|)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using GalaChain address format: {wallet_address[:30]}...")
             elif wallet_address.startswith('0x'):
                 # Ethereum address - convert to eth| format for GalaChain API
@@ -744,7 +744,7 @@ class GalaswapConnector(BaseExchange):
                 logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
                 # Assume it's already in GalaChain format (without prefix, might be client| format)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
@@ -762,24 +762,24 @@ class GalaswapConnector(BaseExchange):
                 f"✓ Using derived Ethereum address for GalaChain API: eth|{derived_ethereum_address[2:30]}... "
                 f"(This should match the address in signature error messages)"
             )
-       
+        
         # Store provided public key if given, but we'll always try to fetch from API first
         # The API public key is the authoritative source - it must match what's registered on GalaChain
         self.public_key = public_key  # May be None - will be fetched from API during connect()
         self._public_key_derived = False  # Track if we derived it (vs fetched from API)
-       
+        
         self.is_connected = False
-       
+        
         # Circuit breaker state (instance-level)
         self._circuit_breaker_failures = 0
         self._circuit_breaker_last_failure = None
-       
+        
         # Token registry for symbol -> token class mapping
         self.token_registry: Dict[str, Dict] = {}
-       
+        
         # Load token registry from config file if available
         self._load_token_registry()
-       
+        
         # Token name mapping for common Gala tokens
         # Maps collection code to actual token name
         self.token_names: Dict[str, str] = {
@@ -812,33 +812,33 @@ class GalaswapConnector(BaseExchange):
             ledger_file=None  # Will use default path
         )
         self._ledger_initialized = False
-       
+        
         logger.info(f"Initialized Galaswap connector for wallet: {wallet_address}")
-
+    
     def _load_token_registry(self):
         """Load token registry from galaswap_tokens.json config file"""
         try:
             import os
             from pathlib import Path
-           
+            
             # Try to find config file relative to project root
             config_paths = [
                 Path(__file__).parent.parent.parent.parent / "config" / "galaswap_tokens.json",
                 Path("config") / "galaswap_tokens.json",
                 Path("../config") / "galaswap_tokens.json",
             ]
-           
+            
             config_file = None
             for path in config_paths:
                 if path.exists():
                     config_file = path
                     break
-           
+            
             if config_file:
                 import json
                 with open(config_file, 'r') as f:
                     config = json.load(f)
-                   
+                    
                 # Load token registry
                 registry = config.get("token_registry", {})
                 for symbol, token_info in registry.items():
@@ -850,22 +850,31 @@ class GalaswapConnector(BaseExchange):
                         "additionalKey": token_info.get("additionalKey", "none")
                     }
                     self.token_registry[symbol.upper()] = token_class
-                   
+                    
                     # Also update token names if provided
                     if "name" in token_info:
                         self.token_names[symbol.upper()] = token_info["name"]
-               
+                
                 logger.info(f"Loaded {len(self.token_registry)} tokens from {config_file}")
         except Exception as e:
             # Don't fail if config file doesn't exist - use defaults
             logger.debug(f"Could not load token registry from config: {e}")
-
+    
     async def connect(self):
         """Connect to GalaConnect API and fetch public key from API (required for GalaChain)"""
         try:
-            # ALWAYS fetch public key from API first - this is the authoritative source
-            # The public key must match what's registered with your GalaChain wallet address
-            try:
+            # Use provided public key if available (from config), otherwise fetch from API
+            # CRITICAL: If public_key is provided in config, use it to avoid 404 errors
+            if self.public_key:
+                logger.info(
+                    f"✓ Using provided public key from config (length={len(self.public_key)}). "
+                    f"This prevents 404 errors from the deprecated public key endpoint."
+                )
+                self._public_key_derived = False
+            else:
+                # Fetch public key from API - this is the authoritative source
+                # The public key must match what's registered with your GalaChain wallet address
+                try:
                 timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     # Use GalaChain address format for public key lookup
@@ -873,7 +882,7 @@ class GalaswapConnector(BaseExchange):
                     # Format Ethereum addresses with eth| prefix for GalaChain API
                     if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
                         gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
-                   
+                    
                     logger.info(f"Fetching public key from GalaChain API for wallet: {gala_address_for_api[:30]}...")
                     async with session.post(
                         f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
@@ -933,13 +942,13 @@ class GalaswapConnector(BaseExchange):
                                 error_msg = error_data.get("Message", error_data.get("message", error_data.get("error", "Unknown error")))
                             except:
                                 error_msg = await response.text()
-                           
+                            
                             logger.warning(
                                 f"Failed to fetch public key from API (status {response.status}): {error_msg}. "
                                 f"This is CRITICAL - public key must match what's registered on GalaChain."
                             )
                             raise Exception(f"API returned status {response.status}: {error_msg}")
-                           
+                            
             except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
                 # Network errors - this is critical, we need the API public key
                 logger.error(
@@ -986,7 +995,40 @@ class GalaswapConnector(BaseExchange):
                         f"Failed to fetch public key from GalaChain API: {error_msg}. "
                         f"This is required for GalaChain API authentication."
                     )
-           
+                except Exception as fetch_error:
+                    error_msg = str(fetch_error)
+                    # Check if it's a 403 error - treat as non-critical (rate limiting)
+                    if "403" in error_msg or "forbidden" in error_msg.lower():
+                        logger.warning(
+                            f"Public key endpoint returned 403 (rate limiting/access restriction). "
+                            f"Using derived public key as fallback."
+                        )
+                        # Derive public key as fallback
+                        try:
+                            derived_pubkey = derive_compressed_public_key(self.private_key)
+                            self.public_key = derived_pubkey
+                            self._public_key_derived = True
+                            logger.warning(
+                                "⚠️ Using DERIVED public key due to API access restriction. "
+                                "This may cause signature errors if the derived key doesn't match registered key."
+                            )
+                        except Exception as derive_error:
+                            logger.error(f"Failed to derive public key: {derive_error}")
+                            raise Exception(
+                                "Cannot get public key: API access forbidden and derivation failed. "
+                                "Please provide public key in configuration or wait for rate limit to reset."
+                            )
+                    else:
+                        # Other errors are still critical
+                        logger.error(
+                            f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
+                            f"Public key MUST match what's registered with your wallet address."
+                        )
+                        raise Exception(
+                            f"Failed to fetch public key from GalaChain API: {error_msg}. "
+                            f"This is required for GalaChain API authentication."
+                        )
+            
             # Initialize Virtual Ledger if not already initialized
             if not self._ledger_initialized:
                 try:
@@ -1034,21 +1076,21 @@ class GalaswapConnector(BaseExchange):
                         f"This may be normal if the wallet is empty or the API format has changed."
                     )
                 # Don't fail connection if balance fetch fails - wallet might just be empty
-           
+            
             self.is_connected = True
-           
+            
             # Verify wallet configuration
             if not self.wallet_address or not self.private_key:
                 logger.warning("Galaswap wallet address or private key not configured properly")
             else:
                 logger.info(f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address}")
-       
+        
         except Exception as e:
             # Don't raise on connection errors - allow bot to continue
             # The exchange will just return empty data when API is unreachable
             error_type = type(e).__name__
             error_msg = str(e)
-           
+            
             # Check if it's a network/connection issue (expected and handled gracefully)
             if 'network' in error_msg.lower() or 'connection' in error_msg.lower() or 'timeout' in error_msg.lower() or 'ClientConnectorError' in error_type:
                 logger.debug(
@@ -1061,45 +1103,45 @@ class GalaswapConnector(BaseExchange):
                     f"Error connecting to Galaswap: {error_type}: {error_msg}. "
                     f"Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"Wallet: {self.wallet_address}"
                 )
-           
+            
             # Still mark as connected so bot can continue - methods will handle API errors gracefully
             self.is_connected = True
             logger.info(f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address[:20]}..." if len(self.wallet_address) > 20 else f"✓ Connected to Galaswap (GalaConnect API) - Wallet: {self.wallet_address}")
-
+    
     async def disconnect(self):
         """Disconnect from API"""
         self.is_connected = False
         logger.info("Disconnected from Galaswap")
-
+    
     def _generate_unique_key(self) -> str:
         """Generate a unique key for API requests"""
         return f"galaconnect-operation-{uuid.uuid4()}"
-
+    
     def _parse_token_class(self, token_str: str) -> Dict:
         """
         Parse token string like "GALA|Unit|none|none" into token class dict
-       
+        
         Format: collection|category|type|additionalKey
         """
         parts = token_str.split('|')
         if len(parts) != 4:
             raise ValueError(f"Invalid token format: {token_str}")
-       
+        
         return {
             "collection": parts[0],
             "category": parts[1],
             "type": parts[2],
             "additionalKey": parts[3]
         }
-
+    
     def _format_token_class(self, token_class: Dict) -> str:
         """Format token class dict to string format"""
         return f"{token_class['collection']}|{token_class['category']}|{token_class['type']}|{token_class['additionalKey']}"
-
+    
     def _parse_symbol(self, symbol: str) -> Tuple[Dict, Dict]:
         """
         Parse symbol like 'GALA/USDT' into token classes
-       
+        
         Returns:
             Tuple of (base_token_class, quote_token_class)
         """
@@ -1107,11 +1149,11 @@ class GalaswapConnector(BaseExchange):
             base, quote = symbol.split('/')
         except ValueError:
             raise ValueError(f"Invalid symbol format: {symbol}. Expected format: BASE/QUOTE")
-       
+        
         # Try to get from registry first
         base_class = self.token_registry.get(base.upper())
         quote_class = self.token_registry.get(quote.upper())
-       
+        
         # If not in registry, use default format
         if not base_class:
             base_class = {
@@ -1120,7 +1162,7 @@ class GalaswapConnector(BaseExchange):
                 "type": "none",
                 "additionalKey": "none"
             }
-       
+        
         if not quote_class:
             quote_class = {
                 "collection": quote.upper(),
@@ -1128,14 +1170,14 @@ class GalaswapConnector(BaseExchange):
                 "type": "none",
                 "additionalKey": "none"
             }
-       
+        
         return base_class, quote_class
-
+    
     def register_token(self, symbol: str, token_class: Dict):
         """Register a token symbol with its token class"""
         self.token_registry[symbol.upper()] = token_class
         logger.info(f"Registered token {symbol} -> {self._format_token_class(token_class)}")
-
+    
     async def _make_signed_request(
         self,
         method: str,
@@ -1146,23 +1188,23 @@ class GalaswapConnector(BaseExchange):
     ) -> dict:
         """
         Make a signed API request
-       
+        
         Args:
             method: HTTP method
             endpoint: API endpoint
             body: Request body
             headers: Additional headers
             retry_on_connection_error: Whether to retry on connection errors
-       
+        
         Returns:
             Response JSON data
-       
+        
         Raises:
             Exception: If request fails after retries
         """
         if headers is None:
             headers = {}
-       
+        
         headers["Content-Type"] = "application/json"
         # Use GalaChain address format for API header (client|... or eth|...)
         # GalaChain API expects the GalaChain address format, not Ethereum address
@@ -1175,7 +1217,7 @@ class GalaswapConnector(BaseExchange):
             f"Using wallet address in X-Wallet-Address header: {wallet_address_for_header[:50]}... "
             f"(Derived from private key: {self.ethereum_address[:20]}...)"
         )
-       
+        
         # Add public key and unique key if not present
         if "signerPublicKey" not in body:
             # Ensure we have the public key from API (not derived)
@@ -1210,19 +1252,19 @@ class GalaswapConnector(BaseExchange):
                             f"Public key must be fetched from GalaChain API. "
                             f"Derived public keys do not match registered keys. Error: {e}"
                         )
-           
+            
             if not self.public_key:
                 raise Exception(
                     "Public key is required for signed requests but is not available. "
                     "Must be fetched from GalaChain API - derived keys will not work."
                 )
-           
+            
             if self._public_key_derived:
                 logger.error(
                     "⚠️ WARNING: Using derived public key - this will likely cause PUBLIC_KEY_MISMATCH errors. "
                     "Public key must be fetched from GalaChain API."
                 )
-           
+            
             body["signerPublicKey"] = self.public_key
             logger.info(
                 f"Using public key for signed request: "
@@ -1233,7 +1275,7 @@ class GalaswapConnector(BaseExchange):
             )
         if "uniqueKey" not in body:
             body["uniqueKey"] = self._generate_unique_key()
-       
+        
         # Sign the request
         try:
             logger.debug(f"Signing request with wallet: {self.wallet_address[:20]}...")
@@ -1243,15 +1285,15 @@ class GalaswapConnector(BaseExchange):
         except Exception as e:
             logger.error(f"Error signing request body: {e}")
             raise Exception(f"Failed to sign request: {e}")
-       
+        
         # Use longer timeout for signed requests (order execution)
         timeout = ClientTimeout(total=self.SIGNED_REQUEST_TIMEOUT)
         last_error = None
-       
+        
         for attempt in range(self.MAX_RETRIES if retry_on_connection_error else 1):
             try:
                 logger.debug(f"Making signed request to {endpoint} (attempt {attempt + 1}/{self.MAX_RETRIES})")
-               
+                
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.request(
                         method,
@@ -1262,18 +1304,18 @@ class GalaswapConnector(BaseExchange):
                         if response.status >= 400:
                             error_text = await response.text()
                             logger.error(f"API error {response.status} for {endpoint}: {error_text[:200]}")
-                           
+                            
                             # Don't retry on 4xx errors (client errors)
                             if 400 <= response.status < 500:
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
-                           
+                            
                             # Retry on 5xx errors (server errors)
                             raise Exception(f"API error {response.status}: {error_text[:200]}")
-                       
+                        
                         result = await response.json()
                         logger.debug(f"Signed request to {endpoint} succeeded")
                         return result
-           
+            
             except (ClientConnectorError, asyncio.TimeoutError) as e:
                 last_error = e
                 # Log connection errors with full URL for debugging
@@ -1293,7 +1335,7 @@ class GalaswapConnector(BaseExchange):
                     logger.error(error_msg)
                     self._record_failure()  # Record failure for circuit breaker
                     raise Exception(error_msg) from e
-           
+            
             except Exception as e:
                 # For non-connection errors, don't retry unless it's a 5xx error
                 error_msg = str(e)
@@ -1303,12 +1345,12 @@ class GalaswapConnector(BaseExchange):
                     await asyncio.sleep(delay)
                     continue
                 raise
-       
+        
         # Should never reach here, but just in case
         if last_error:
             raise last_error
         raise Exception("Unexpected error in _make_signed_request")
-
+    
     def _check_circuit_breaker(self) -> bool:
         """Check if circuit breaker should allow requests"""
         # Reset circuit breaker if enough time has passed
@@ -1319,7 +1361,7 @@ class GalaswapConnector(BaseExchange):
                 self._circuit_breaker_last_failure = None
                 logger.info("Galaswap circuit breaker reset - re-enabling API requests")
                 return True
-       
+        
         # Check if circuit breaker is open
         if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
             logger.debug(
@@ -1327,27 +1369,27 @@ class GalaswapConnector(BaseExchange):
                 f"consecutive failures. Will retry after {self._circuit_breaker_reset_time}s"
             )
             return False
-       
+        
         return True
-
+    
     def _record_success(self):
         """Record successful API call - reset circuit breaker"""
         if self._circuit_breaker_failures > 0:
             logger.debug(f"Galaswap API recovered - resetting circuit breaker")
             self._circuit_breaker_failures = 0
             self._circuit_breaker_last_failure = None
-
+    
     def _record_failure(self):
         """Record failed API call - update circuit breaker"""
         self._circuit_breaker_failures += 1
         self._circuit_breaker_last_failure = datetime.now()
-       
+        
         if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
             logger.warning(
                 f"Galaswap circuit breaker OPENED after {self._circuit_breaker_failures} failures. "
                 f"API will be disabled for {self._circuit_breaker_reset_time}s to prevent spam."
             )
-
+    
     async def _make_unsigned_request(
         self,
         method: str,
@@ -1357,26 +1399,26 @@ class GalaswapConnector(BaseExchange):
     ) -> dict:
         """
         Make an unsigned API request (for read operations)
-       
+        
         Args:
             method: HTTP method
             endpoint: API endpoint
             body: Request body
             retry_on_connection_error: Whether to retry on connection errors
-       
+        
         Returns:
             Response JSON data
-       
+        
         Raises:
             Exception: If request fails after retries
         """
         # Check circuit breaker
         if not self._check_circuit_breaker():
             raise Exception("Circuit breaker is OPEN - API temporarily disabled due to repeated failures")
-       
+        
         headers = {"Content-Type": "application/json"}
         timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
-       
+        
         last_error = None
         for attempt in range(self.MAX_RETRIES if retry_on_connection_error else 1):
             try:
@@ -1451,7 +1493,7 @@ class GalaswapConnector(BaseExchange):
                                 f"URL={self.API_BASE_URL}{endpoint}, "
                                 f"Error={error_text[:200]}"
                             )
-                           
+                            
                             # Handle 502 Bad Gateway and 503 Service Unavailable as temporary errors
                             if response.status in [502, 503, 504]:
                                 # These are temporary server errors
@@ -1461,13 +1503,13 @@ class GalaswapConnector(BaseExchange):
                                 # Other 4xx/5xx errors - log the actual error
                                 # Only record as failure if not a deprecated endpoint 404, pool not found 400, or forbidden 403
                                 if not (response.status == 404 and is_deprecated) and not is_pool_not_found and not is_forbidden:
-                                    self._record_failure()
+                                self._record_failure()
                                 raise Exception(f"API error {response.status}: {error_text[:200]}")
-                       
+                        
                         # Success - reset circuit breaker
                         self._record_success()
                         return await response.json()
-           
+            
             except (ClientConnectorError, asyncio.TimeoutError) as e:
                 last_error = e
                 self._record_failure()
@@ -1478,7 +1520,7 @@ class GalaswapConnector(BaseExchange):
                     f"URL={self.API_BASE_URL}{endpoint}, "
                     f"Error={type(e).__name__}: {str(e)[:200]}"
                 )
-               
+                
                 if attempt < (self.MAX_RETRIES - 1) if retry_on_connection_error else 0:
                     delay = self.RETRY_DELAY_BASE * (2 ** attempt)
                     # Log on first attempt to see what's failing
@@ -1488,23 +1530,23 @@ class GalaswapConnector(BaseExchange):
                 else:
                     logger.error(f"{error_msg} - Failed after {self.MAX_RETRIES} attempts")
                     raise Exception(f"Failed to connect to Galaswap API: {error_msg}") from e
-           
+            
             except Exception as e:
                 # For non-connection errors, don't retry
                 raise
-       
+        
         # Should never reach here, but just in case
         if last_error:
             raise last_error
         raise Exception("Unexpected error in _make_unsigned_request")
-
+    
     async def get_order_book(self, symbol: str, depth: int = 10) -> OrderBook:
         """
         Get order book for a symbol (from available swaps)
-       
+        
         Note: Galaswap doesn't have traditional order books.
         We simulate one from available swaps.
-       
+        
         Returns empty order book if API is unreachable to allow bot to continue.
         """
         try:
@@ -1518,9 +1560,9 @@ class GalaswapConnector(BaseExchange):
                     asks=[],
                     timestamp=datetime.now()
                 )
-           
+            
             base_class, quote_class = self._parse_symbol(symbol)
-           
+            
             # NEW API: Use /v1/trade/pool and /v1/trade/quote to build order book
             # V3 DEX uses liquidity pools, not traditional order books
             # We'll simulate an order book using quotes at different amounts
@@ -1549,8 +1591,8 @@ class GalaswapConnector(BaseExchange):
            
             pool_data = None
             for fee in fee_tiers:
-                try:
-                    response = await self._make_unsigned_request(
+            try:
+                response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
@@ -1581,7 +1623,7 @@ class GalaswapConnector(BaseExchange):
                     asks=[],
                     timestamp=datetime.now()
                 )
-           
+            
             # Get current price using quote endpoint
             # We want the price of base in terms of quote (how much quote for 1 base)
             # So we need: tokenIn = quote, tokenOut = base
@@ -1624,7 +1666,7 @@ class GalaswapConnector(BaseExchange):
                     asks=[],
                     timestamp=datetime.now()
                 )
-           
+            
             # Build simulated order book from current price
             # V3 DEX doesn't have traditional order book, so we simulate one
             bids = []
@@ -1641,7 +1683,7 @@ class GalaswapConnector(BaseExchange):
                 price = current_price * (1 + 0.001 * (i + 1))  # 0.1% spread per level
                 quantity = 10.0 / (i + 1)  # Decreasing quantity
                 asks.append((price, quantity))
-           
+            
             return OrderBook(
                 exchange=self.exchange_name,
                 symbol=symbol,
@@ -1649,7 +1691,7 @@ class GalaswapConnector(BaseExchange):
                 asks=asks,
                 timestamp=datetime.now()
             )
-       
+        
         except (ClientConnectorError, asyncio.TimeoutError) as e:
             # Connection errors: return empty order book to allow bot to continue
             logger.debug(
@@ -1676,11 +1718,11 @@ class GalaswapConnector(BaseExchange):
                 asks=[],
                 timestamp=datetime.now()
             )
-
+    
     async def get_ticker(self, symbol: str) -> Dict:
         """
         Get ticker data for a symbol using new GalaSwap DEX API
-       
+        
         Uses /v1/trade/price endpoint for base token price, then calculates bid/ask from quotes.
         Returns empty ticker data if API is unreachable to allow bot to continue.
         """
@@ -1743,10 +1785,10 @@ class GalaswapConnector(BaseExchange):
                 # Fallback to order book method if new API fails
                 logger.debug(f"New price API failed for {symbol}, trying order book: {api_error}")
             order_book = await self.get_order_book(symbol, depth=1)
-           
+            
             best_bid = order_book.best_bid
             best_ask = order_book.best_ask
-           
+            
             if best_bid and best_ask:
                 mid_price = (best_bid[0] + best_ask[0]) / 2
                 return {
@@ -1766,7 +1808,7 @@ class GalaswapConnector(BaseExchange):
                     'volume': 0.0,
                     'timestamp': datetime.now()
                 }
-       
+        
         except Exception as e:
             # Return empty ticker data on any error to allow bot to continue
             error_type = type(e).__name__
@@ -1780,7 +1822,7 @@ class GalaswapConnector(BaseExchange):
                 'volume': 0.0,
                 'timestamp': datetime.now()
             }
-
+    
     async def get_balance(self, asset: Optional[str] = None) -> Dict[str, Balance]:
         """
         Get account balance using Virtual Ledger (primary) or API (fallback)
@@ -1868,11 +1910,11 @@ class GalaswapConnector(BaseExchange):
                
                 # Fallback 1: Try old endpoint (might still work in some cases)
                 try:
-                    response = await self._make_unsigned_request(
-                        "POST",
-                        "/galachain/api/asset/token-contract/FetchBalances",
-                        {"owner": gala_address_for_api}
-                    )
+            response = await self._make_unsigned_request(
+                "POST",
+                "/galachain/api/asset/token-contract/FetchBalances",
+                {"owner": gala_address_for_api}
+            )
                     balance_data = response.get("Data", [])
                     logger.debug("Successfully fetched balances from old endpoint")
                 except Exception as old_error:
@@ -1937,17 +1979,17 @@ class GalaswapConnector(BaseExchange):
             if not balance_data:
                 logger.debug("No token data returned from Galaswap balance API")
                 return {}
-           
+            
             balances = {}
             data = balance_data
-           
+            
             if not data:
                 logger.debug("No token data returned from Galaswap balance API")
-           
+            
             for token_data in data:
                 try:
                     token_class = token_data.get("tokenClass", {})
-                   
+                    
                     # Try multiple fields to get the collection/symbol
                     collection = (
                         token_class.get("collection") or
@@ -1956,7 +1998,7 @@ class GalaswapConnector(BaseExchange):
                         token_data.get("symbol") or
                         ""
                     )
-                   
+                    
                     # Get token name from various possible fields
                     token_name = (
                         token_data.get("name") or
@@ -1967,7 +2009,7 @@ class GalaswapConnector(BaseExchange):
                         token_class.get("displayName") or
                         None
                     )
-                   
+                    
                     # Handle quantity - might be a list or single value
                     quantity_raw = token_data.get("quantity", "0")
                     if isinstance(quantity_raw, list):
@@ -1977,7 +2019,7 @@ class GalaswapConnector(BaseExchange):
                         quantity = float(quantity_raw)
                     else:
                         quantity = float(quantity_raw) if quantity_raw else 0.0
-                   
+                    
                     # Handle lockedHolds - might be a list or single value
                     locked_raw = token_data.get("lockedHolds", "0")
                     if isinstance(locked_raw, list):
@@ -1987,7 +2029,7 @@ class GalaswapConnector(BaseExchange):
                         locked = float(locked_raw)
                     else:
                         locked = float(locked_raw) if locked_raw else 0.0
-                   
+                    
                     if quantity > 0 or locked > 0:
                         # Determine symbol - try collection first, then derive from name
                         if collection:
@@ -2000,7 +2042,7 @@ class GalaswapConnector(BaseExchange):
                                 if token_name.lower() == known_name.lower() or known_name.lower() in token_name.lower():
                                     symbol = known_symbol
                                     break
-                           
+                            
                             # If no match, try to create symbol from name
                             if not symbol:
                                 # Remove common words and create symbol
@@ -2030,17 +2072,17 @@ class GalaswapConnector(BaseExchange):
                                     f"tokenClass keys: {list(token_class.keys())}"
                                 )
                                 symbol = "UNKNOWN"
-                       
+                        
                         # Get actual token name from mapping if we have a symbol
                         if not token_name and symbol:
                             token_name = self.token_names.get(symbol, symbol)
                         elif not token_name:
                             token_name = symbol
-                       
+                        
                         # Try to get additional info from token class
                         category = token_class.get("category", "")
                         type_info = token_class.get("type", "")
-                       
+                        
                         # Create display name: "Token Name (SYMBOL)" or just "Token Name"
                         if token_name and token_name != symbol and symbol != "UNKNOWN":
                             display_name = f"{token_name} ({symbol})"
@@ -2050,7 +2092,7 @@ class GalaswapConnector(BaseExchange):
                             display_name = f"{symbol} ({category.upper()})"
                         else:
                             display_name = symbol if symbol != "UNKNOWN" else (token_name or "Unknown Token")
-                       
+                        
                         # Use symbol as key, but display_name for the asset field
                         balances[symbol] = Balance(
                             asset=display_name,  # Use actual token name for better readability
@@ -2060,7 +2102,7 @@ class GalaswapConnector(BaseExchange):
                 except Exception as e:
                     logger.warning(f"Error parsing balance for token: {e}. Token data: {json.dumps(token_data, default=str)[:200]}")
                     continue
-           
+            
             # Sync Virtual Ledger with API balances if we successfully fetched them
             # This keeps the ledger up-to-date when API is available
             if balance_data and self._ledger_initialized:
@@ -2079,9 +2121,9 @@ class GalaswapConnector(BaseExchange):
             # Filter by asset if specified
             if asset:
                 return {asset: balances.get(asset)} if asset in balances else {}
-           
+            
             return balances
-       
+        
         except Exception as e:
             error_msg = (
                 f"Error fetching Galaswap balance for wallet {self.wallet_address}. "
@@ -2103,11 +2145,11 @@ class GalaswapConnector(BaseExchange):
             # Return empty balances if ledger is also unavailable
             logger.debug("No Virtual Ledger balances available, returning empty balances")
             return {}
-
+    
     async def place_market_order(
-        self,
-        symbol: str,
-        side: str,
+        self, 
+        symbol: str, 
+        side: str, 
         quantity: float
     ) -> Order:
         """
@@ -2130,10 +2172,10 @@ class GalaswapConnector(BaseExchange):
             # Ensure we're connected and have the public key
             if not self.is_connected or not self.public_key:
                 await self.connect()
-           
+            
             logger.info(f"Placing {side.upper()} market order for {quantity} {symbol} on GalaSwap")
             base_class, quote_class = self._parse_symbol(symbol)
-           
+            
             # NEW API: V3 DEX with payload generation API
             # Flow: 1. Get quote 2. Generate payload 3. Sign payload 4. Execute on bundle API
            
@@ -2599,29 +2641,29 @@ class GalaswapConnector(BaseExchange):
                 )
            
             # Return order with appropriate status
-            # Only mark as filled if verified or API confirmed execution
-            final_status = 'filled' if (verified_execution or transaction_status == 'filled') else 'pending'
+            # Trust 201 response = filled (Virtual Ledger already updated)
+            final_status = transaction_status  # Already set to 'filled' for 201 responses
             filled_qty = float(amount_out) if side.lower() == 'buy' else float(amount_in) if final_status == 'filled' else 0.0
-               
-            return Order(
-                exchange=self.exchange_name,
+                
+                return Order(
+                    exchange=self.exchange_name,
                 order_id=order_id,
-                symbol=symbol,
-                side=side,
+                    symbol=symbol,
+                    side=side,
                 type='market',
-                price=price,
+                    price=price,
                 quantity=float(amount_out) if side.lower() == 'buy' else float(amount_in),
                 filled_quantity=filled_qty,
                 status=final_status,  # 'pending' or 'filled' based on verification
-                timestamp=datetime.now(),
-                commission=None,
-                commission_asset=None
-            )
-       
+                    timestamp=datetime.now(),
+                    commission=None,
+                    commission_asset=None
+                )
+        
         except Exception as e:
             logger.error(f"Error placing market order: {e}")
             raise
-
+    
     async def place_limit_order(
         self,
         symbol: str,
@@ -2650,15 +2692,15 @@ class GalaswapConnector(BaseExchange):
             body = {
                 "swapRequestId": order_id
             }
-           
+            
             await self._make_signed_request("POST", "/v1/TerminateTokenSwap", body)
             logger.info(f"Successfully cancelled swap {order_id}")
             return True
-       
+        
         except Exception as e:
             logger.error(f"Error cancelling order: {e}")
             return False
-
+    
     async def get_order_status(self, symbol: str, order_id: str) -> Order:
         """
         Get order status for GalaSwap V3 DEX
@@ -2721,7 +2763,7 @@ class GalaswapConnector(BaseExchange):
            
             # Use new V3 DEX endpoint: GET /v1/trade/positions
             try:
-                response = await self._make_unsigned_request(
+            response = await self._make_unsigned_request(
                     "GET",
                     f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
                     None  # GET request, no body
@@ -2779,7 +2821,7 @@ class GalaswapConnector(BaseExchange):
                     # Get price from position (would need pool data for accurate price)
                     # For now, use liquidity as quantity indicator
                     quantity = liquidity
-                   
+                    
                     return Order(
                         exchange=self.exchange_name,
                         order_id=position_id,
@@ -2794,7 +2836,7 @@ class GalaswapConnector(BaseExchange):
                         commission=None,
                         commission_asset=None
                     )
-           
+            
             # Order not found in positions
             logger.debug(f"Order {order_id} not found in user positions")
             return Order(
@@ -2811,20 +2853,20 @@ class GalaswapConnector(BaseExchange):
                 commission=None,
                 commission_asset=None
             )
-       
+        
         except Exception as e:
             logger.error(f"Error getting order status: {e}")
             raise
-
+    
     async def get_trading_fees(self, symbol: str) -> Dict[str, float]:
         """Get trading fees (Galaswap typically has very low/no fees)"""
         # Galaswap fees are typically 0% or very low
         return {'maker': 0.0, 'taker': 0.0}
-
+    
     async def get_min_order_size(self, symbol: str) -> float:
         """Get minimum order size"""
         return 0.00000001  # Very small minimum
-
+    
     async def get_exchange_info(self, symbol: str) -> Dict:
         """Get exchange information for a symbol"""
         return {

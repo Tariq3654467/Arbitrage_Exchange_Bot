@@ -210,6 +210,17 @@ class Settings(BaseSettings):
         
         if 'exchanges' in config_data:
             self.exchanges = config_data['exchanges']
+            
+            # Extract GalaSwap-specific config from dex section
+            if 'dex' in self.exchanges:
+                for dex_config in self.exchanges['dex']:
+                    if dex_config.get('name') == 'galaswap':
+                        # Load wallet_address and public_key from config if not set via env
+                        if not self.gala_wallet_address and dex_config.get('wallet_address'):
+                            self.gala_wallet_address = dex_config.get('wallet_address')
+                        if not self.gala_public_key and dex_config.get('public_key'):
+                            self.gala_public_key = dex_config.get('public_key')
+                        break
         
         if 'networks' in config_data:
             self.networks = {
