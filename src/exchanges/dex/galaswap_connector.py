@@ -739,7 +739,7 @@ class GalaswapConnector(BaseExchange):
             # Addresses match - use provided format (may have eth| or client| prefix)
             if '|' in wallet_address:
                 # Already in GalaChain format (eth| or client|)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using GalaChain address format: {wallet_address[:30]}...")
             elif wallet_address.startswith('0x'):
                 # Ethereum address - convert to eth| format for GalaChain API
@@ -747,7 +747,7 @@ class GalaswapConnector(BaseExchange):
                 logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
                 # Assume it's already in GalaChain format (without prefix, might be client| format)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
@@ -981,14 +981,14 @@ class GalaswapConnector(BaseExchange):
                         )
                 else:
                     # Other errors are still critical
-                    logger.error(
-                        f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
-                        f"Public key MUST match what's registered with your wallet address."
-                    )
-                    raise Exception(
-                        f"Failed to fetch public key from GalaChain API: {error_msg}. "
-                        f"This is required for GalaChain API authentication."
-                    )
+                logger.error(
+                    f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
+                    f"Public key MUST match what's registered with your wallet address."
+                )
+                raise Exception(
+                    f"Failed to fetch public key from GalaChain API: {error_msg}. "
+                    f"This is required for GalaChain API authentication."
+                )
             
             # Initialize Virtual Ledger if not already initialized
             if not self._ledger_initialized:
@@ -1464,8 +1464,8 @@ class GalaswapConnector(BaseExchange):
                                 # Other 4xx/5xx errors - log the actual error
                                 # Only record as failure if not a deprecated endpoint 404, pool not found 400, or forbidden 403
                                 if not (response.status == 404 and is_deprecated) and not is_pool_not_found and not is_forbidden:
-                                    self._record_failure()
-                                    raise Exception(f"API error {response.status}: {error_text[:200]}")
+                                self._record_failure()
+                                raise Exception(f"API error {response.status}: {error_text[:200]}")
                                 # If it's a deprecated endpoint, pool not found, or forbidden, don't record failure
                                 # These are handled gracefully elsewhere
                         
@@ -1554,8 +1554,8 @@ class GalaswapConnector(BaseExchange):
             
             pool_data = None
             for fee in fee_tiers:
-                try:
-                    response = await self._make_unsigned_request(
+            try:
+                response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
@@ -1873,11 +1873,11 @@ class GalaswapConnector(BaseExchange):
                 
                 # Fallback 1: Try old endpoint (might still work in some cases)
                 try:
-                    response = await self._make_unsigned_request(
-                        "POST",
-                        "/galachain/api/asset/token-contract/FetchBalances",
-                        {"owner": gala_address_for_api}
-                    )
+            response = await self._make_unsigned_request(
+                "POST",
+                "/galachain/api/asset/token-contract/FetchBalances",
+                {"owner": gala_address_for_api}
+            )
                     balance_data = response.get("Data", [])
                     logger.debug("Successfully fetched balances from old endpoint")
                 except Exception as old_error:
@@ -2662,7 +2662,7 @@ class GalaswapConnector(BaseExchange):
                                 f"(expected ~{expected_token_out_change})"
                             )
                             break
-            else:  # sell
+                    else:  # sell
                         # Selling: should receive token_out (quote), spend token_in (base)
                         expected_token_in_decrease = float(amount_in)
                         token_in_decrease = initial_token_in - current_token_in
