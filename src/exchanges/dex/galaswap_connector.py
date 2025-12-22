@@ -1891,10 +1891,11 @@ class GalaswapConnector(BaseExchange):
                     # For market orders, set sqrtPriceLimit based on direction:
                     # - Buy (tokenIn=quote, tokenOut=base): use very large (no upper limit)
                     # - Sell (tokenIn=base, tokenOut=quote): use very small but not zero (no lower limit)
+                    # NOTE: Must be within safe numeric range [-9007199254740991, 9007199254740991]
                     if side.lower() == 'buy':
                         # Buying: allow execution at any price (no upper limit)
-                        # Use a very large number
-                        sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                        # Use maximum safe integer (JavaScript Number.MAX_SAFE_INTEGER)
+                        sqrt_price_limit = "9007199254740991"
                     else:
                         # Selling: allow execution at any price (no lower limit)
                         # Use a very small positive number (not zero)
@@ -1904,27 +1905,29 @@ class GalaswapConnector(BaseExchange):
                 else:
                     # Fallback: use direction-based defaults
                     if side.lower() == 'buy':
-                        sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                        sqrt_price_limit = "9007199254740991"  # Max safe integer
                     else:
                         sqrt_price_limit = "0.000000000000000001"
             except Exception as e:
                 logger.debug(f"Could not get pool sqrtPrice, using default: {e}")
                 # Fallback: use direction-based defaults
                 if side.lower() == 'buy':
-                    sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                    sqrt_price_limit = "9007199254740991"  # Max safe integer
                 else:
                     sqrt_price_limit = "0.000000000000000001"
             
             # Ensure sqrtPriceLimit is a valid numeric string (not "0" or empty)
             if not sqrt_price_limit or sqrt_price_limit == "0" or sqrt_price_limit == "0.0":
                 if side.lower() == 'buy':
-                    sqrt_price_limit = "999999999999999999999999999999999999999999999999"
+                    sqrt_price_limit = "9007199254740991"  # Max safe integer
                 else:
                     sqrt_price_limit = "0.000000000000000001"
             
             # Calculate slippage protection (1% slippage tolerance)
             amount_in_max = format_quantity(float(amount_in) * 1.01, decimals=8)  # 1% more
-            amount_out_min = format_quantity(float(amount_out) * 0.99, decimals=8)  # 1% less
+            # amountOutMinimum must be negative (API requirement)
+            # It represents the minimum amount of output tokens we want to receive
+            amount_out_min = format_quantity(-abs(float(amount_out) * 0.99), decimals=8)  # 1% less, negative
             
             swap_payload_request = {
                 "tokenIn": token_in,
