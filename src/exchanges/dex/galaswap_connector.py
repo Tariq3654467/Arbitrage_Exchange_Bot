@@ -2048,12 +2048,32 @@ class GalaswapConnector(BaseExchange):
             # Sign the payload (sign the payload_data object)
             # Bundle API expects hex signature (r + s concatenated), not base64 DER
             logger.debug("Signing swap payload for bundle execution...")
+            
+            # Log payload being signed for debugging
+            logger.debug(f"Payload to sign: {json.dumps(payload_data, default=str, indent=2)}")
+            
             signature = sign_payload_for_bundle(payload_data, self.private_key)
+            
+            # Verify signature format (should be 128 hex characters)
+            if len(signature) != 128:
+                raise ValueError(f"Invalid signature length: {len(signature)} (expected 128 hex characters)")
+            
+            logger.debug(f"Generated signature (first 20 chars): {signature[:20]}... (length: {len(signature)})")
             
             # Get user address in GalaChain format
             user_address = getattr(self, 'wallet_address_for_api', self.wallet_address)
             if user_address.startswith('0x') and '|' not in user_address:
                 user_address = f"eth|{user_address[2:]}"
+            
+            # Verify user address matches the private key's derived address
+            derived_address = getattr(self, 'derived_ethereum_address', None)
+            if derived_address:
+                expected_address = f"eth|{derived_address[2:]}" if derived_address.startswith('0x') else derived_address
+                if user_address.lower() != expected_address.lower():
+                    logger.warning(
+                        f"⚠️ WARNING: User address '{user_address}' does not match derived address '{expected_address}'. "
+                        f"This may cause signature verification to fail!"
+                    )
             
             # Prepare bundle request
             bundle_request = {
@@ -2063,7 +2083,13 @@ class GalaswapConnector(BaseExchange):
                 "user": user_address  # User address in eth| format
             }
             
-            logger.info(f"Executing swap bundle: type=swap, user={user_address[:30]}...")
+            logger.info(
+                f"Executing swap bundle: type=swap, user={user_address}, "
+                f"uniqueKey={unique_key[:30]}..., signature_length={len(signature)}"
+            )
+            
+            # Log bundle request (without full signature for security)
+            logger.debug(f"Bundle request (signature truncated): {json.dumps({**bundle_request, 'signature': signature[:20] + '...'}, default=str)}")
             
             # Execute on bundle API (unsigned request - signature is in the body)
             execution_result = await self._make_unsigned_request(
@@ -2072,23 +2098,66 @@ class GalaswapConnector(BaseExchange):
                 bundle_request
             )
             
+            # Log full response for debugging
+            logger.debug(f"Bundle API response: {json.dumps(execution_result, default=str)}")
+            
+            # Check response status - bundle API returns 201 for success
+            response_status = execution_result.get("status")
+            response_message = execution_result.get("message", "")
+            response_error = execution_result.get("error", False)
+            
+            if response_error or (response_status and response_status not in [200, 201]):
+                error_details = execution_result.get("data", {})
+                raise ValueError(
+                    f"Bundle API returned error: status={response_status}, "
+                    f"message={response_message}, error={response_error}, "
+                    f"details={error_details}"
+                )
+            
             # Extract transaction/order ID from result
-            # Bundle API response format: {"status": 201, "data": {"data": "transaction-id", ...}}
+            # Bundle API response format: {"status": 201, "data": {"data": "transaction-id", "message": "...", ...}}
             bundle_data = execution_result.get("data", {})
+            
+            # Check if transaction was actually submitted
             if isinstance(bundle_data, dict):
-                order_id = (
+                transaction_message = bundle_data.get("message", "")
+                transaction_id = (
                     bundle_data.get("data") or  # Transaction ID from bundle
                     bundle_data.get("transactionId") or
                     bundle_data.get("txid") or
                     unique_key  # Fallback to uniqueKey
                 )
+                
+                # Log transaction details
+                logger.info(
+                    f"Bundle API response - Status: {response_status}, "
+                    f"Message: {transaction_message}, "
+                    f"Transaction ID: {transaction_id}"
+                )
+                
+                # Check if message indicates success
+                if transaction_message and "received" in transaction_message.lower():
+                    logger.warning(
+                        f"Bundle API returned 'received' status - transaction may not be executed yet. "
+                        f"Transaction ID: {transaction_id}. "
+                        f"Please verify transaction on-chain."
+                    )
+                elif transaction_message and "success" in transaction_message.lower():
+                    logger.info(f"Bundle API confirmed transaction execution: {transaction_id}")
+                
+                order_id = transaction_id
             else:
                 order_id = unique_key  # Fallback
+                logger.warning(f"Bundle API response format unexpected, using uniqueKey: {execution_result}")
             
             if not order_id:
                 order_id = unique_key
             
-            logger.info(f"Swap executed successfully. Transaction ID: {order_id}")
+            logger.info(
+                f"Swap submitted to bundle API. Transaction ID: {order_id}. "
+                f"Status: {response_status}, Message: {response_message}. "
+                f"Please verify transaction on-chain to confirm execution."
+            )
             
             return Order(
                 exchange=self.exchange_name,
