@@ -492,7 +492,7 @@ async def get_trading_config():
             "min_profit_threshold": 0.001,
             "max_trade_size_percent": 10.0,
             "max_slippage_percent": 1.0,
-            "order_timeout_seconds": 30,
+                "order_timeout_seconds": 120,
             "paper_trading": settings.bot.paper_trading if settings.bot else False
         }
     

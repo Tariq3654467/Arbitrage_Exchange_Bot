@@ -64,7 +64,7 @@ class TradeExecutor:
         exchanges: Dict[str, BaseExchange],
         paper_trading: bool = True,
         max_concurrent_trades: int = 3,
-        order_timeout: int = 30
+        order_timeout: int = 120
     ):
         """
         Initialize trade executor

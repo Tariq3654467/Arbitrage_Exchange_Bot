@@ -14,7 +14,7 @@ trading:
   min_profit_threshold: 0.001  # Minimum profit % after all fees (0.001% = very small gap for frequent testing)
   max_trade_size_percent: 10  # Max % of available capital per trade
   max_slippage_percent: 1.0   # Max slippage for DEX trades
-  order_timeout_seconds: 30   # Max time to wait for order execution
+  order_timeout_seconds: 120   # Max time to wait for order execution (increased from 30s to 120s)
   retry_attempts: 3
   auto_discover_pairs: true   # Automatically discover trading pairs from exchanges
   max_discovered_pairs: 50   # Maximum number of pairs to auto-discover (prevents rate limits and file descriptor issues)
