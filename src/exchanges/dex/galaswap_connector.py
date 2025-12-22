@@ -1788,6 +1788,15 @@ class GalaswapConnector(BaseExchange):
         We need the new execution endpoints from the API documentation.
         """
         try:
+            # Check circuit breaker first
+            if not self._check_circuit_breaker():
+                raise Exception(
+                    "GalaSwap API circuit breaker is OPEN. "
+                    "Too many API failures detected. "
+                    "Please wait a few minutes before retrying. "
+                    "This may be due to rate limiting or API access restrictions."
+                )
+            
             # Ensure we're connected and have the public key
             if not self.is_connected or not self.public_key:
                 await self.connect()
@@ -1846,6 +1855,8 @@ class GalaswapConnector(BaseExchange):
             quote_data = None
             selected_fee = None
             last_error = None
+            retry_count = 0
+            max_retries = 3  # Max retries for 403 errors
             
             for fee in fee_options:
                 try:
@@ -1862,7 +1873,34 @@ class GalaswapConnector(BaseExchange):
                             quote_url = f"/v1/trade/quote?tokenIn={token_in_key}&tokenOut={token_out_key}&amountOut={amount_out}"
                     
                     logger.debug(f"Getting quote for {symbol}: {quote_url}")
-                    quote_response = await self._make_unsigned_request("GET", quote_url, None)
+                    
+                    # Retry logic for 403 errors with exponential backoff
+                    quote_response = None
+                    for attempt in range(max_retries):
+                        try:
+                            quote_response = await self._make_unsigned_request("GET", quote_url, None)
+                            break  # Success, exit retry loop
+                        except Exception as retry_error:
+                            error_msg_retry = str(retry_error)
+                            if "403" in error_msg_retry or "forbidden" in error_msg_retry.lower():
+                                if attempt < max_retries - 1:
+                                    # Exponential backoff: 1s, 2s, 4s
+                                    wait_time = 2 ** attempt
+                                    logger.debug(
+                                        f"403 error on quote attempt {attempt + 1}/{max_retries} for {symbol}. "
+                                        f"Waiting {wait_time}s before retry..."
+                                    )
+                                    await asyncio.sleep(wait_time)
+                                    continue
+                                else:
+                                    # Last attempt failed, raise the error
+                                    raise
+                            else:
+                                # Not a 403 error, raise immediately
+                                raise
+                    
+                    if quote_response is None:
+                        raise Exception("Failed to get quote after retries")
                     
                     # Check response structure
                     if isinstance(quote_response, dict):
@@ -1889,6 +1927,14 @@ class GalaswapConnector(BaseExchange):
                     elif "Token0 must be smaller" in error_msg:
                         # Quote endpoint shouldn't have this issue, but log it
                         logger.debug(f"Token ordering issue for quote {symbol} with fee tier {fee}: {e}")
+                    elif "403" in error_msg or "forbidden" in error_msg.lower():
+                        # 403 error - rate limiting, add delay before trying next fee tier
+                        logger.warning(
+                            f"Quote failed for {symbol} with fee tier {fee} due to 403 (rate limiting). "
+                            f"Will retry with next fee tier after delay..."
+                        )
+                        # Add delay before trying next fee tier to avoid rate limits
+                        await asyncio.sleep(0.5)  # 500ms delay
                     elif "400" in error_msg or "404" in error_msg:
                         logger.debug(f"Quote endpoint error for {symbol} with fee {fee}: {error_msg[:200]}")
                     else:
