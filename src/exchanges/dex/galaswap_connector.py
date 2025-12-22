@@ -981,14 +981,14 @@ class GalaswapConnector(BaseExchange):
                         )
                 else:
                     # Other errors are still critical
-                logger.error(
-                    f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
-                    f"Public key MUST match what's registered with your wallet address."
-                )
-                raise Exception(
-                    f"Failed to fetch public key from GalaChain API: {error_msg}. "
-                    f"This is required for GalaChain API authentication."
-                )
+                    logger.error(
+                        f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
+                        f"Public key MUST match what's registered with your wallet address."
+                    )
+                    raise Exception(
+                        f"Failed to fetch public key from GalaChain API: {error_msg}. "
+                        f"This is required for GalaChain API authentication."
+                    )
             
             # Initialize Virtual Ledger if not already initialized
             if not self._ledger_initialized:
