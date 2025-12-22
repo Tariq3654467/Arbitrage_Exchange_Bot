@@ -736,7 +736,7 @@ class GalaswapConnector(BaseExchange):
             # Addresses match - use provided format (may have eth| or client| prefix)
             if '|' in wallet_address:
                 # Already in GalaChain format (eth| or client|)
-            self.wallet_address_for_api = wallet_address
+                self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using GalaChain address format: {wallet_address[:30]}...")
             elif wallet_address.startswith('0x'):
                 # Ethereum address - convert to eth| format for GalaChain API
@@ -744,7 +744,7 @@ class GalaswapConnector(BaseExchange):
                 logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
                 # Assume it's already in GalaChain format (without prefix, might be client| format)
-            self.wallet_address_for_api = wallet_address
+                self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
