@@ -401,6 +401,10 @@ class GalaswapConnector(BaseExchange):
     # Note: https://swap.gala.com/ is the frontend website, not the API endpoint
     # Check environment variable first, then use default
     API_BASE_URL = os.getenv("GALASWAP_API_BASE_URL", "https://dex-backend-prod1.defi.gala.com")
+    
+    # Asset API Base URL - for GalaChain Asset API (separate from DEX API)
+    # Used for fetching actual on-chain balances
+    ASSET_API_BASE_URL = os.getenv("GALASWAP_ASSET_API_BASE_URL", "https://api-galaswap.gala.com")
     REQUEST_TIMEOUT = 10  # seconds (increased for signed requests)
     SIGNED_REQUEST_TIMEOUT = 30  # seconds (longer timeout for order execution)
     MAX_RETRIES = 3  # Increased retries for better reliability
@@ -1512,74 +1516,121 @@ class GalaswapConnector(BaseExchange):
             if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
                 gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
             
-            # OLD API endpoint (deprecated - returns 404)
-            # Try old endpoint first, then try alternative approaches
+            # NEW: Use GalaChain Asset API endpoint for actual on-chain balances
+            # POST https://api-galaswap.gala.com/v1/FetchBalances
+            # This endpoint provides real balance data, not just positions
             balance_data = None
+            
+            # If specific asset requested, we need to parse it to tokenClass format
+            token_class = None
+            if asset:
+                # Try to parse asset symbol to tokenClass
+                # Asset might be in format like "GALA", "GUSDC", etc.
+                # We'll need to construct a tokenClass object
+                # For now, query all balances and filter by asset name
+                pass  # Will filter after fetching all balances
+            
             try:
-                response = await self._make_unsigned_request(
-                    "POST",
-                    "/galachain/api/asset/token-contract/FetchBalances",
-                    {"owner": gala_address_for_api}
-                )
-                balance_data = response.get("Data", [])
+                # Use Asset API endpoint (separate from DEX API)
+                # Request body: {"owner": "eth|address", "tokenClass": {...}} or just {"owner": "eth|address"} for all
+                request_body = {"owner": gala_address_for_api}
+                if token_class:
+                    request_body["tokenClass"] = token_class
+                
+                # Make request to Asset API (different base URL)
+                async with aiohttp.ClientSession() as session:
+                    url = f"{self.ASSET_API_BASE_URL}/v1/FetchBalances"
+                    async with session.post(
+                        url,
+                        json=request_body,
+                        timeout=ClientTimeout(total=self.REQUEST_TIMEOUT),
+                        headers={"Content-Type": "application/json"}
+                    ) as response:
+                        if response.status == 200:
+                            response_data = await response.json()
+                            # Asset API response format may vary - try common fields
+                            balance_data = (
+                                response_data.get("Data", []) or
+                                response_data.get("data", []) or
+                                response_data.get("balances", []) or
+                                (response_data if isinstance(response_data, list) else [])
+                            )
+                            logger.debug(f"Successfully fetched {len(balance_data)} token balances from Asset API")
+                        else:
+                            error_text = await response.text()
+                            raise Exception(f"Asset API error {response.status}: {error_text[:200]}")
+                            
             except Exception as e:
                 error_msg = str(e)
-                # If it's a 404, the endpoint is deprecated - try alternative approach
-                if "404" in error_msg or "Cannot POST" in error_msg:
-                    logger.debug(
-                        f"GalaSwap balance endpoint deprecated (404). "
-                        f"Trying to infer balances from positions..."
+                logger.debug(f"Asset API endpoint failed: {error_msg}. Trying fallback methods...")
+                
+                # Fallback 1: Try old endpoint (might still work in some cases)
+                try:
+                    response = await self._make_unsigned_request(
+                        "POST",
+                        "/galachain/api/asset/token-contract/FetchBalances",
+                        {"owner": gala_address_for_api}
                     )
-                    # Try to get balances from positions (liquidity positions may have token info)
-                    # This is a workaround - positions don't show all balances, only liquidity
-                    try:
-                        positions_response = await self._make_unsigned_request(
-                            "GET",
-                            f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
-                            None
+                    balance_data = response.get("Data", [])
+                    logger.debug("Successfully fetched balances from old endpoint")
+                except Exception as old_error:
+                    error_msg_old = str(old_error)
+                    # If it's a 404 or 403, the endpoint is deprecated or forbidden
+                    if "404" in error_msg_old or "403" in error_msg_old or "Cannot POST" in error_msg_old or "forbidden" in error_msg_old.lower():
+                        logger.debug(
+                            f"Old balance endpoint unavailable (404/403). "
+                            f"Trying to infer balances from positions as last resort..."
                         )
-                        positions_data = positions_response.get("data", {})
-                        positions = positions_data.get("Data", {}).get("positions", []) if isinstance(positions_data, dict) else []
-                        
-                        # Extract token balances from positions (limited - only shows tokens in positions)
-                        # This won't show all balances, but it's better than nothing
-                        balance_data = []
-                        seen_tokens = set()
-                        for position in positions:
-                            token0 = position.get("token0ClassKey", {})
-                            token1 = position.get("token1ClassKey", {})
+                        # Fallback 2: Try to get balances from positions (liquidity positions may have token info)
+                        # This is a workaround - positions don't show all balances, only liquidity
+                        try:
+                            positions_response = await self._make_unsigned_request(
+                                "GET",
+                                f"/v1/trade/positions?user={gala_address_for_api}&limit=10",
+                                None
+                            )
+                            positions_data = positions_response.get("data", {})
+                            positions = positions_data.get("Data", {}).get("positions", []) if isinstance(positions_data, dict) else []
                             
-                            # Add token0 if not seen
-                            token0_key = f"{token0.get('collection', '')}${token0.get('category', '')}${token0.get('type', '')}${token0.get('additionalKey', '')}"
-                            if token0_key and token0_key not in seen_tokens:
-                                balance_data.append({
-                                    "tokenClass": token0,
-                                    "quantity": "0",  # Positions don't show available balance
-                                    "lockedHolds": []
-                                })
-                                seen_tokens.add(token0_key)
+                            # Extract token balances from positions (limited - only shows tokens in positions)
+                            # This won't show all balances, but it's better than nothing
+                            balance_data = []
+                            seen_tokens = set()
+                            for position in positions:
+                                token0 = position.get("token0ClassKey", {})
+                                token1 = position.get("token1ClassKey", {})
+                                
+                                # Add token0 if not seen
+                                token0_key = f"{token0.get('collection', '')}${token0.get('category', '')}${token0.get('type', '')}${token0.get('additionalKey', '')}"
+                                if token0_key and token0_key not in seen_tokens:
+                                    balance_data.append({
+                                        "tokenClass": token0,
+                                        "quantity": "0",  # Positions don't show available balance
+                                        "lockedHolds": []
+                                    })
+                                    seen_tokens.add(token0_key)
+                                
+                                # Add token1 if not seen
+                                token1_key = f"{token1.get('collection', '')}${token1.get('category', '')}${token1.get('type', '')}${token1.get('additionalKey', '')}"
+                                if token1_key and token1_key not in seen_tokens:
+                                    balance_data.append({
+                                        "tokenClass": token1,
+                                        "quantity": "0",  # Positions don't show available balance
+                                        "lockedHolds": []
+                                    })
+                                    seen_tokens.add(token1_key)
                             
-                            # Add token1 if not seen
-                            token1_key = f"{token1.get('collection', '')}${token1.get('category', '')}${token1.get('type', '')}${token1.get('additionalKey', '')}"
-                            if token1_key and token1_key not in seen_tokens:
-                                balance_data.append({
-                                    "tokenClass": token1,
-                                    "quantity": "0",  # Positions don't show available balance
-                                    "lockedHolds": []
-                                })
-                                seen_tokens.add(token1_key)
-                        
-                        if balance_data:
-                            logger.debug(f"Inferred {len(balance_data)} tokens from positions (balances will be 0)")
-                        else:
-                            logger.debug("No positions found, cannot infer balances")
+                            if balance_data:
+                                logger.debug(f"Inferred {len(balance_data)} tokens from positions (balances will be 0)")
+                            else:
+                                logger.debug("No positions found, cannot infer balances")
+                                return {}
+                        except Exception as pos_error:
+                            logger.debug(f"Could not get balances from positions: {pos_error}")
                             return {}
-                    except Exception as pos_error:
-                        logger.debug(f"Could not get balances from positions: {pos_error}")
-                        return {}
-                else:
-                    # Other errors - record as failure
-                    raise
+                    else:
+                        # Other errors from old endpoint - re-raise
+                        raise
             
             if not balance_data:
                 logger.debug("No token data returned from Galaswap balance API")
