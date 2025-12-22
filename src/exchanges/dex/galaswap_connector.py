@@ -875,20 +875,20 @@ class GalaswapConnector(BaseExchange):
                 # Fetch public key from API - this is the authoritative source
                 # The public key must match what's registered with your GalaChain wallet address
                 try:
-                timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    # Use GalaChain address format for public key lookup
-                    gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
-                    # Format Ethereum addresses with eth| prefix for GalaChain API
-                    if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
-                        gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
-                    
-                    logger.info(f"Fetching public key from GalaChain API for wallet: {gala_address_for_api[:30]}...")
-                    async with session.post(
-                        f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
-                        json={"user": gala_address_for_api},
-                        headers={"Content-Type": "application/json"}
-                    ) as response:
+                    timeout = ClientTimeout(total=self.REQUEST_TIMEOUT)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        # Use GalaChain address format for public key lookup
+                        gala_address_for_api = getattr(self, 'wallet_address_for_api', self.wallet_address)
+                        # Format Ethereum addresses with eth| prefix for GalaChain API
+                        if gala_address_for_api.startswith('0x') and '|' not in gala_address_for_api:
+                            gala_address_for_api = f"eth|{gala_address_for_api[2:]}"
+                        
+                        logger.info(f"Fetching public key from GalaChain API for wallet: {gala_address_for_api[:30]}...")
+                        async with session.post(
+                            f"{self.API_BASE_URL}/galachain/api/asset/public-key-contract/GetPublicKey",
+                            json={"user": gala_address_for_api},
+                            headers={"Content-Type": "application/json"}
+                        ) as response:
                         if response.status in [404, 403]:
                             # Endpoint deprecated (404) or forbidden (403) - try to derive public key or use provided one
                             status_msg = "deprecated (404)" if response.status == 404 else "forbidden (403 - rate limiting/access restriction)"
@@ -949,51 +949,17 @@ class GalaswapConnector(BaseExchange):
                             )
                             raise Exception(f"API returned status {response.status}: {error_msg}")
                             
-            except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
-                # Network errors - this is critical, we need the API public key
-                logger.error(
-                    f"❌ CRITICAL: Cannot connect to GalaChain API to fetch public key: {fetch_error}. "
-                    f"Public key MUST be fetched from API to match your registered wallet. "
-                    f"Derived public keys will NOT work for GalaChain API."
-                )
-                raise Exception(
-                    f"Cannot fetch public key from GalaChain API. "
-                    f"This is required - derived public keys do not match registered keys. "
-                    f"Error: {fetch_error}"
-                )
-            except Exception as fetch_error:
-                error_msg = str(fetch_error)
-                # Check if it's a 403 error - treat as non-critical (rate limiting)
-                if "403" in error_msg or "forbidden" in error_msg.lower():
-                    logger.warning(
-                        f"Public key endpoint returned 403 (rate limiting/access restriction). "
-                        f"Using derived public key as fallback."
-                    )
-                    # Derive public key as fallback
-                    try:
-                        derived_pubkey = derive_compressed_public_key(self.private_key)
-                        self.public_key = derived_pubkey
-                        self._public_key_derived = True
-                        logger.warning(
-                            "⚠️ Using DERIVED public key due to API access restriction. "
-                            "This may cause signature errors if the derived key doesn't match registered key."
-                        )
-                        return  # Successfully derived, continue
-                    except Exception as derive_error:
-                        logger.error(f"Failed to derive public key: {derive_error}")
-                        raise Exception(
-                            "Cannot get public key: API access forbidden and derivation failed. "
-                            "Please provide public key in configuration or wait for rate limit to reset."
-                        )
-                else:
-                    # Other errors are still critical
+                except (ClientConnectorError, asyncio.TimeoutError) as fetch_error:
+                    # Network errors - this is critical, we need the API public key
                     logger.error(
-                        f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
-                        f"Public key MUST match what's registered with your wallet address."
+                        f"❌ CRITICAL: Cannot connect to GalaChain API to fetch public key: {fetch_error}. "
+                        f"Public key MUST be fetched from API to match your registered wallet. "
+                        f"Derived public keys will NOT work for GalaChain API."
                     )
                     raise Exception(
-                        f"Failed to fetch public key from GalaChain API: {error_msg}. "
-                        f"This is required for GalaChain API authentication."
+                        f"Cannot fetch public key from GalaChain API. "
+                        f"This is required - derived public keys do not match registered keys. "
+                        f"Error: {fetch_error}"
                     )
                 except Exception as fetch_error:
                     error_msg = str(fetch_error)
@@ -1012,6 +978,7 @@ class GalaswapConnector(BaseExchange):
                                 "⚠️ Using DERIVED public key due to API access restriction. "
                                 "This may cause signature errors if the derived key doesn't match registered key."
                             )
+                            return  # Successfully derived, continue
                         except Exception as derive_error:
                             logger.error(f"Failed to derive public key: {derive_error}")
                             raise Exception(
