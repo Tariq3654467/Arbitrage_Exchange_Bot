@@ -747,7 +747,7 @@ class GalaswapConnector(BaseExchange):
                 logger.info(f"✓ Converted Ethereum address to GalaChain format: eth|{wallet_address[2:30]}...")
             else:
                 # Assume it's already in GalaChain format (without prefix, might be client| format)
-                self.wallet_address_for_api = wallet_address
+            self.wallet_address_for_api = wallet_address
                 logger.info(f"✓ Using provided GalaChain address: {wallet_address[:30]}...")
         else:
             # Addresses don't match - CRITICAL: Use derived address to fix signature errors
@@ -981,14 +981,14 @@ class GalaswapConnector(BaseExchange):
                         )
                 else:
                     # Other errors are still critical
-                    logger.error(
-                        f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
-                        f"Public key MUST match what's registered with your wallet address."
-                    )
-                    raise Exception(
-                        f"Failed to fetch public key from GalaChain API: {error_msg}. "
-                        f"This is required for GalaChain API authentication."
-                    )
+                logger.error(
+                    f"❌ CRITICAL: Failed to fetch public key from GalaChain API: {error_msg}. "
+                    f"Public key MUST match what's registered with your wallet address."
+                )
+                raise Exception(
+                    f"Failed to fetch public key from GalaChain API: {error_msg}. "
+                    f"This is required for GalaChain API authentication."
+                )
             
             # Initialize Virtual Ledger if not already initialized
             if not self._ledger_initialized:
@@ -1554,8 +1554,8 @@ class GalaswapConnector(BaseExchange):
             
             pool_data = None
             for fee in fee_tiers:
-            try:
-                response = await self._make_unsigned_request(
+                try:
+                    response = await self._make_unsigned_request(
                         "GET",
                         f"/v1/trade/pool?token0={token0_key}&token1={token1_key}&fee={fee}",
                         None  # GET request
