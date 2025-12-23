@@ -802,7 +802,7 @@ async def execute_test_trade(
 ):
     """
     Execute a single manual test trade without requiring an arbitrage opportunity.
-
+    
     This will:
     - Build a synthetic ArbitrageOpportunity using current prices
       from the specified buy/sell exchanges.
@@ -812,6 +812,9 @@ async def execute_test_trade(
     try:
         from ...api.main import bot
         from ...arbitrage.price_monitor import PriceData
+        global _dry_run_state
+
+        is_dry_run_active = bool(_dry_run_state.get("active")) if isinstance(_dry_run_state, dict) else False
 
         if not bot or not bot.is_running:
             raise HTTPException(status_code=400, detail="Bot is not running")
@@ -845,46 +848,87 @@ async def execute_test_trade(
         buy_price_data = bot.price_monitor.get_current_price(symbol, request.buy_exchange) if bot.price_monitor else None
         sell_price_data = bot.price_monitor.get_current_price(symbol, request.sell_exchange) if bot.price_monitor else None
 
+        # Helper: create synthetic prices for GalaSwap during dry-run so you can always
+        # demonstrate at least one "trade" even when on-chain liquidity is zero.
+        def _make_synthetic_price_data(exchange_name: str) -> PriceData:
+            # Try to borrow a price from the other side first, otherwise fall back to a constant.
+            base_price = None
+            if exchange_name == request.buy_exchange and sell_price_data:
+                base_price = sell_price_data.mid or sell_price_data.ask or sell_price_data.bid
+            elif exchange_name == request.sell_exchange and buy_price_data:
+                base_price = buy_price_data.mid or buy_price_data.ask or buy_price_data.bid
+
+            if not base_price or base_price <= 0:
+                base_price = 0.01  # Fallback synthetic price for demo
+
+            bid = base_price * 0.999
+            ask = base_price * 1.001
+            mid = (bid + ask) / 2
+
+            return PriceData(
+                exchange=exchange_name,
+                symbol=symbol,
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                spread=ask - bid,
+                spread_percent=((ask - bid) / mid) * 100 if mid > 0 else 0,
+                timestamp=datetime.now(),
+                order_book=None,
+            )
+
         # Fallback: fetch order books directly if needed
         if not buy_price_data:
             ob = await buy_ex.get_order_book(symbol, depth=10)
             if not ob.best_ask:
-                # Provide helpful error message with suggestions
-                error_detail = f"No ask liquidity for {symbol} on {request.buy_exchange}"
-                if request.buy_exchange == "galaswap":
-                    error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (sell on galaswap, buy on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
-                raise HTTPException(status_code=400, detail=error_detail)
-            buy_price_data = PriceData(
-                exchange=request.buy_exchange,
-                symbol=symbol,
-                bid=ob.best_bid[0] if ob.best_bid else ob.best_ask[0],
-                ask=ob.best_ask[0],
-                mid=(ob.best_bid[0] + ob.best_ask[0]) / 2 if ob.best_bid else ob.best_ask[0],
-                spread=ob.spread or 0,
-                spread_percent=ob.spread_percent or 0,
-                timestamp=ob.timestamp,
-                order_book=ob,
-            )
+                # During dry-run, simulate GalaSwap liquidity so you can demo a trade
+                if request.buy_exchange == "galaswap" and is_dry_run_active:
+                    logger.warning(f"Simulating GalaSwap ask liquidity for {symbol} during dry-run test trade")
+                    buy_price_data = _make_synthetic_price_data(request.buy_exchange)
+                else:
+                    # Provide helpful error message with suggestions
+                    error_detail = f"No ask liquidity for {symbol} on {request.buy_exchange}"
+                    if request.buy_exchange == "galaswap":
+                        error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (sell on galaswap, buy on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
+                    raise HTTPException(status_code=400, detail=error_detail)
+            else:
+                buy_price_data = PriceData(
+                    exchange=request.buy_exchange,
+                    symbol=symbol,
+                    bid=ob.best_bid[0] if ob.best_bid else ob.best_ask[0],
+                    ask=ob.best_ask[0],
+                    mid=(ob.best_bid[0] + ob.best_ask[0]) / 2 if ob.best_bid else ob.best_ask[0],
+                    spread=ob.spread or 0,
+                    spread_percent=ob.spread_percent or 0,
+                    timestamp=ob.timestamp,
+                    order_book=ob,
+                )
 
         if not sell_price_data:
             ob = await sell_ex.get_order_book(symbol, depth=10)
             if not ob.best_bid:
-                # Provide helpful error message with suggestions
-                error_detail = f"No bid liquidity for {symbol} on {request.sell_exchange}"
-                if request.sell_exchange == "galaswap":
-                    error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (buy on galaswap, sell on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
-                raise HTTPException(status_code=400, detail=error_detail)
-            sell_price_data = PriceData(
-                exchange=request.sell_exchange,
-                symbol=symbol,
-                bid=ob.best_bid[0],
-                ask=ob.best_ask[0] if ob.best_ask else ob.best_bid[0],
-                mid=(ob.best_bid[0] + ob.best_ask[0]) / 2 if ob.best_ask else ob.best_bid[0],
-                spread=ob.spread or 0,
-                spread_percent=ob.spread_percent or 0,
-                timestamp=ob.timestamp,
-                order_book=ob,
-            )
+                # During dry-run, simulate GalaSwap liquidity so you can demo a trade
+                if request.sell_exchange == "galaswap" and is_dry_run_active:
+                    logger.warning(f"Simulating GalaSwap bid liquidity for {symbol} during dry-run test trade")
+                    sell_price_data = _make_synthetic_price_data(request.sell_exchange)
+                else:
+                    # Provide helpful error message with suggestions
+                    error_detail = f"No bid liquidity for {symbol} on {request.sell_exchange}"
+                    if request.sell_exchange == "galaswap":
+                        error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (buy on galaswap, sell on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
+                    raise HTTPException(status_code=400, detail=error_detail)
+            else:
+                sell_price_data = PriceData(
+                    exchange=request.sell_exchange,
+                    symbol=symbol,
+                    bid=ob.best_bid[0],
+                    ask=ob.best_ask[0] if ob.best_ask else ob.best_bid[0],
+                    mid=(ob.best_bid[0] + ob.best_ask[0]) / 2 if ob.best_ask else ob.best_bid[0],
+                    spread=ob.spread or 0,
+                    spread_percent=ob.spread_percent or 0,
+                    timestamp=ob.timestamp,
+                    order_book=ob,
+                )
 
         buy_price = buy_price_data.ask
         sell_price = sell_price_data.bid
@@ -945,6 +989,7 @@ async def execute_test_trade(
             "actual_profit_usd": result.actual_profit_usd,
             "actual_profit_percent": result.actual_profit_percent,
             "error_message": result.error_message,
+            "dry_run": is_dry_run_active,
         }
     except HTTPException:
         raise
