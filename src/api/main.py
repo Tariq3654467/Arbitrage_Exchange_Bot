@@ -905,6 +905,14 @@ async def get_available_pairs():
                 for symbol, market in markets.items():
                     if market.get('active') and market.get('type') == 'spot':
                         all_pairs.add(symbol)
+            # For DEX exchanges (like GalaSwap), get pairs from price monitor
+            elif exchange_name == 'galaswap' and bot.price_monitor:
+                # Get all trading pairs that the bot is monitoring
+                galaswap_pairs = [
+                    pair for pair in bot.price_monitor.trading_pairs
+                    if 'galaswap' in bot.price_monitor.symbol_exchange_map.get(pair, [])
+                ]
+                all_pairs.update(galaswap_pairs)
         except Exception as e:
             logger.error(f"Error fetching available pairs from {exchange_name}: {e}")
             continue
