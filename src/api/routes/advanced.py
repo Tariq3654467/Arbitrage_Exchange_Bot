@@ -828,13 +828,18 @@ async def execute_test_trade(
         symbol = request.symbol
         
         # Validate: Same-exchange trades don't make sense for arbitrage
-        if request.buy_exchange == request.sell_exchange:
+        # But allow them if force_execute is true (for testing)
+        force_execute = getattr(request, 'force_execute', False)
+        if request.buy_exchange == request.sell_exchange and not force_execute:
             raise HTTPException(
                 status_code=400,
                 detail=f"Same-exchange trades ({request.buy_exchange} → {request.buy_exchange}) are not profitable for arbitrage. "
                        f"You're buying and selling on the same exchange, which will always lose money due to spread and fees. "
-                       f"Use different exchanges for arbitrage (e.g., buy on binance, sell on galaswap)."
+                       f"Use different exchanges for arbitrage (e.g., buy on binance, sell on galaswap). "
+                       f"Or add 'force_execute: true' to bypass this check for testing."
             )
+        elif request.buy_exchange == request.sell_exchange and force_execute:
+            logger.warning(f"⚠️ FORCING same-exchange trade: {request.buy_exchange} → {request.sell_exchange} (will likely lose money due to spread/fees)")
 
         # Try to get current prices from price monitor first (fast path)
         buy_price_data = bot.price_monitor.get_current_price(symbol, request.buy_exchange) if bot.price_monitor else None
