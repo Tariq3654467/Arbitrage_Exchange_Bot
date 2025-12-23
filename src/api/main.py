@@ -1117,6 +1117,38 @@ async def get_risk_metrics():
         return {"error": str(e)}
 
 
+@app.post("/api/bot/emergency-stop/reset")
+async def reset_emergency_stop(username: str = Depends(verify_credentials)):
+    """Reset emergency stop and optionally reset drawdown"""
+    global bot
+    
+    if not bot or not bot.risk_manager:
+        raise HTTPException(status_code=400, detail="Bot not running")
+    
+    try:
+        # Get current portfolio value
+        portfolio_value = await bot.portfolio_manager.get_total_portfolio_value()
+        
+        # Reset drawdown by updating peak capital
+        bot.risk_manager.reset_drawdown(portfolio_value)
+        
+        await broadcast_message({
+            "type": "alert",
+            "level": "info",
+            "message": "Emergency stop reset and drawdown reset"
+        })
+        
+        return {
+            "status": "success",
+            "message": "Emergency stop and drawdown reset",
+            "new_peak_capital": portfolio_value,
+            "drawdown_percent": 0.0
+        }
+    except Exception as e:
+        logger.error(f"Error resetting emergency stop: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/bot/trading/enable")
 async def enable_trading(username: str = Depends(verify_credentials)):
     """Enable automatic trading"""

@@ -245,6 +245,13 @@ class RiskManager:
         self.emergency_stop_triggered = False
         self.is_trading_enabled = True
     
+    def reset_drawdown(self, current_portfolio_value: float):
+        """Reset drawdown by updating peak capital to current value"""
+        logger.info(f"Resetting drawdown: peak_capital ${self.peak_capital:.2f} -> ${current_portfolio_value:.2f}")
+        self.peak_capital = current_portfolio_value
+        if self.emergency_stop_triggered:
+            self.reset_emergency_stop()
+    
     def get_risk_metrics(self, current_portfolio_value: float, active_trades: int = 0) -> RiskMetrics:
         """Get current risk metrics"""
         drawdown = self.calculate_drawdown(current_portfolio_value)
