@@ -269,6 +269,31 @@ class BinanceConnector(BaseExchange):
         try:
             logger.info(f"Placing Binance MARKET {side} order: {quantity} {symbol}")
             
+            # Validate minimum notional before placing order
+            try:
+                # Get current price to calculate notional
+                ticker = await self.exchange.fetch_ticker(symbol)
+                current_price = ticker.get('last') or ticker.get('ask') or ticker.get('bid')
+                
+                if current_price:
+                    notional_value = quantity * current_price
+                    min_notional = await self.get_min_notional(symbol)
+                    
+                    if notional_value < min_notional:
+                        error_msg = (
+                            f"Order notional value (${notional_value:.2f}) is below minimum (${min_notional:.2f}) for {symbol}. "
+                            f"Required quantity: {min_notional / current_price:.8f} {symbol.split('/')[0]} "
+                            f"(or increase trade amount to at least ${min_notional * 1.1:.2f} USD)"
+                        )
+                        logger.error(error_msg)
+                        raise ValueError(error_msg)
+            except ValueError:
+                # Re-raise validation errors
+                raise
+            except Exception as validation_error:
+                # Log but don't fail on validation errors - let Binance API reject if needed
+                logger.debug(f"Could not validate minimum notional before order: {validation_error}")
+            
             order = await self.exchange.create_market_order(
                 symbol=symbol,
                 side=side,
@@ -281,6 +306,26 @@ class BinanceConnector(BaseExchange):
             logger.error(f"Insufficient funds for Binance order: {e}")
             raise
         except ccxt.InvalidOrder as e:
+            error_msg = str(e)
+            # Provide helpful error message for NOTIONAL errors
+            if 'NOTIONAL' in error_msg or '-1013' in error_msg:
+                try:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    current_price = ticker.get('last') or ticker.get('ask') or ticker.get('bid')
+                    min_notional = await self.get_min_notional(symbol)
+                    if current_price:
+                        required_quantity = min_notional / current_price
+                        helpful_msg = (
+                            f"Binance minimum notional not met for {symbol}. "
+                            f"Order value: ${quantity * current_price:.2f}, "
+                            f"Minimum required: ${min_notional:.2f}. "
+                            f"Required quantity: {required_quantity:.8f} {symbol.split('/')[0]} "
+                            f"(or increase trade amount to at least ${min_notional * 1.1:.2f} USD)"
+                        )
+                        logger.error(helpful_msg)
+                        raise ValueError(helpful_msg)
+                except Exception:
+                    pass  # Fall through to original error
             logger.error(f"Invalid Binance order: {e}")
             raise
         except Exception as e:
@@ -362,6 +407,37 @@ class BinanceConnector(BaseExchange):
         except Exception as e:
             logger.error(f"Error fetching Binance min order size: {e}")
             return 0.0
+    
+    async def get_min_notional(self, symbol: str) -> float:
+        """Get minimum notional value (price * quantity) for a symbol"""
+        try:
+            markets = await self.exchange.load_markets()
+            market = markets.get(symbol)
+            
+            if market:
+                # Check for MIN_NOTIONAL filter
+                filters = market.get('info', {}).get('filters', [])
+                for filter_item in filters:
+                    if filter_item.get('filterType') == 'MIN_NOTIONAL':
+                        min_notional = float(filter_item.get('minNotional', 0))
+                        # Some pairs use 'notional' instead of 'minNotional'
+                        if min_notional == 0:
+                            min_notional = float(filter_item.get('notional', 0))
+                        if min_notional > 0:
+                            return min_notional
+                
+                # Fallback: check limits
+                if 'limits' in market and 'cost' in market['limits']:
+                    min_cost = market['limits']['cost'].get('min', 0)
+                    if min_cost > 0:
+                        return min_cost
+            
+            # Default minimum notional for most Binance pairs
+            return 10.0
+        
+        except Exception as e:
+            logger.warning(f"Error fetching Binance min notional for {symbol}, using default $10: {e}")
+            return 10.0
     
     async def get_exchange_info(self, symbol: str) -> Dict:
         """Get exchange information"""
