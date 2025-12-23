@@ -8,7 +8,7 @@ import base64
 import asyncio
 import os
 from typing import Optional, Dict, List, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 import aiohttp
 from aiohttp import ClientConnectorError, ClientTimeout
 from eth_account import Account
@@ -773,6 +773,10 @@ class GalaswapConnector(BaseExchange):
         # Circuit breaker state (instance-level)
         self._circuit_breaker_failures = 0
         self._circuit_breaker_last_failure = None
+        
+        # Rate limit cooldown: track when we hit 403 errors to avoid rapid retries
+        self._rate_limit_cooldown_until = None  # datetime when cooldown expires
+        self._rate_limit_cooldown_duration = 600  # 10 minutes cooldown after rate limiting
         
         # Token registry for symbol -> token class mapping
         self.token_registry: Dict[str, Dict] = {}
@@ -2280,6 +2284,15 @@ class GalaswapConnector(BaseExchange):
                 f"amountIn={amount_in}, amountOut={amount_out}"
             )
            
+            # Check rate limit cooldown first
+            if self._rate_limit_cooldown_until and datetime.now() < self._rate_limit_cooldown_until:
+                remaining_seconds = (self._rate_limit_cooldown_until - datetime.now()).total_seconds()
+                raise ValueError(
+                    f"⏳ RATE LIMIT COOLDOWN: GalaSwap API is in cooldown period due to rate limiting. "
+                    f"Please wait {int(remaining_seconds)} more seconds ({int(remaining_seconds/60)} minutes) before retrying. "
+                    f"This prevents hitting rate limits again immediately."
+                )
+            
             # Get quote to determine amounts and find available pool
             # Note: Quote endpoint doesn't require token ordering (token0/token1), it uses tokenIn/tokenOut
             # But the underlying pool must exist, and pools require token0 < token1
@@ -2367,10 +2380,16 @@ class GalaswapConnector(BaseExchange):
                         all_403_errors = True  # Track that we're getting 403 errors
                         logger.warning(
                             f"Quote failed for {symbol} with fee tier {fee} due to 403 (rate limiting). "
-                            f"Will retry with next fee tier after delay..."
+                            f"Will retry with next fee tier after longer delay..."
                         )
                         # Add longer delay before trying next fee tier to avoid rate limits
-                        await asyncio.sleep(2.0)  # 2 second delay to help with rate limiting
+                        # Use increasing delays: 5s, 7s, 9s, 11s for each fee tier attempt
+                        try:
+                            fee_index = fee_options.index(fee) if fee in fee_options else 0
+                        except (ValueError, AttributeError):
+                            fee_index = 0
+                        delay_seconds = 5.0 + (fee_index * 2.0)  # 5s, 7s, 9s, 11s
+                        await asyncio.sleep(delay_seconds)
                     elif "400" in error_msg or "404" in error_msg:
                         logger.debug(f"Quote endpoint error for {symbol} with fee {fee}: {error_msg[:200]}")
                     else:
@@ -2382,11 +2401,17 @@ class GalaswapConnector(BaseExchange):
                
                 # Check if all errors were 403 (rate limiting)
                 if last_error and ("403" in str(last_error) or "forbidden" in str(last_error).lower()):
+                    # Set rate limit cooldown to prevent immediate retries
+                    self._rate_limit_cooldown_until = datetime.now() + timedelta(seconds=self._rate_limit_cooldown_duration)
+                    logger.warning(
+                        f"⚠️ Rate limit detected for GalaSwap API. Setting {self._rate_limit_cooldown_duration/60:.0f}-minute cooldown. "
+                        f"All requests will be blocked until {self._rate_limit_cooldown_until.strftime('%H:%M:%S')}"
+                    )
                     raise ValueError(
                         f"❌ RATE LIMITING: Could not get quote for {symbol} due to API rate limiting (403 Forbidden). "
                         f"All fee tiers returned 403 errors. "
                         f"This indicates the API is blocking requests due to rate limits. "
-                        f"Please wait 5-10 minutes before retrying. "
+                        f"Bot will automatically wait {self._rate_limit_cooldown_duration/60:.0f} minutes before retrying. "
                         f"Tried fee tiers: {fee_options}. "
                         f"Last error: {error_details}"
                     )

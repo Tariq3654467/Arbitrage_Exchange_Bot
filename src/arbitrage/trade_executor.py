@@ -260,7 +260,26 @@ class TradeExecutor:
                         )
                 else:
                     result.status = TradeStatus.PARTIAL
-                    result.error_message = "One or more orders not fully filled"
+                    # Provide more detailed error message, especially for GalaSwap
+                    error_details = []
+                    if buy_order:
+                        error_details.append(f"Buy order: status={buy_order.status}, filled={buy_filled}/{analysis.buy_amount}")
+                    if sell_order:
+                        error_details.append(f"Sell order: status={sell_order.status}, filled={sell_filled}/{analysis.sell_amount}")
+                    
+                    # Check if this is a GalaSwap liquidity issue
+                    is_galaswap = (analysis.opportunity.buy_exchange == "galaswap" or 
+                                  analysis.opportunity.sell_exchange == "galaswap")
+                    if is_galaswap and (buy_filled == 0 or sell_filled == 0):
+                        result.error_message = (
+                            f"GalaSwap order not filled - no liquidity available. "
+                            f"{'; '.join(error_details)}. "
+                            f"GalaSwap is a DEX with dynamic liquidity pools. "
+                            f"This pair may not have an active pool or sufficient liquidity. "
+                            f"Try checking /api/market/galaswap/liquidity for pairs with active pools."
+                        )
+                    else:
+                        result.error_message = f"One or more orders not fully filled. {'; '.join(error_details)}"
             else:
                 result.status = TradeStatus.FAILED
                 result.error_message = "Order execution failed"
