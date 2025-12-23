@@ -674,6 +674,52 @@ async def update_risk_config(
 
 # ==================== Market Data Routes ====================
 
+@app.get("/api/market/galaswap/liquidity")
+async def get_galaswap_liquidity():
+    """
+    Check which GalaSwap pairs have active liquidity pools.
+    Returns pairs that have real bid/ask quotes available.
+    """
+    global bot
+    
+    if not bot or not bot.is_running:
+        raise HTTPException(status_code=400, detail="Bot is not running")
+    
+    galaswap = bot.exchanges.get("galaswap")
+    if not galaswap:
+        raise HTTPException(status_code=400, detail="GalaSwap exchange not connected")
+    
+    # Common pairs to check
+    pairs_to_check = [
+        "GALA/USDT", "GALA/GUSDT", "GALA/GUSDC",
+        "GUSDT/GALA", "GUSDC/GALA",
+        "GUSDT/USDT", "GUSDC/USDT",
+        "BTC/USDT", "ETH/USDT",
+        "GALA/BTC", "GALA/ETH"
+    ]
+    
+    pairs_with_liquidity = []
+    
+    for symbol in pairs_to_check:
+        try:
+            order_book = await galaswap.get_order_book(symbol, depth=1)
+            if order_book.best_bid and order_book.best_ask:
+                pairs_with_liquidity.append({
+                    "symbol": symbol,
+                    "bid": order_book.best_bid[0],
+                    "ask": order_book.best_ask[0],
+                    "spread_percent": ((order_book.best_ask[0] - order_book.best_bid[0]) / order_book.best_bid[0] * 100) if order_book.best_bid[0] > 0 else 0
+                })
+        except Exception as e:
+            logger.debug(f"Could not check liquidity for {symbol}: {e}")
+            continue
+    
+    return {
+        "pairs_with_liquidity": pairs_with_liquidity,
+        "count": len(pairs_with_liquidity)
+    }
+
+
 @app.get("/api/market/prices")
 async def get_current_prices(all_pairs: bool = False):
     """
