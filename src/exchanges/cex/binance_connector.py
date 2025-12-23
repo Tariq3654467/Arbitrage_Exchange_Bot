@@ -308,6 +308,10 @@ class BinanceConnector(BaseExchange):
                 amount=quantity
             )
             
+            # Handle case where order creation returns None (shouldn't happen, but be safe)
+            if order is None:
+                raise ValueError(f"Binance order creation returned None for {symbol}. Order may not have been created.")
+            
             return self._parse_order(order)
         
         except ccxt.InsufficientFunds as e:
@@ -381,6 +385,11 @@ class BinanceConnector(BaseExchange):
         """Get order status"""
         try:
             order = await self.exchange.fetch_order(order_id, symbol)
+            
+            # Handle case where order doesn't exist (returns None)
+            if order is None:
+                raise ValueError(f"Order {order_id} not found on Binance for {symbol}. Order may not have been created.")
+            
             return self._parse_order(order)
         except Exception as e:
             logger.error(f"Error fetching Binance order status: {e}")
@@ -461,6 +470,13 @@ class BinanceConnector(BaseExchange):
     
     def _parse_order(self, order_data: Dict) -> Order:
         """Parse CCXT order data to Order object"""
+        # Handle None or invalid order data
+        if order_data is None:
+            raise ValueError("Cannot parse None order data. Order may not have been created.")
+        
+        if not isinstance(order_data, dict):
+            raise ValueError(f"Invalid order data type: {type(order_data)}. Expected dict.")
+        
         # Handle missing or None timestamp
         timestamp_value = order_data.get('timestamp')
         if timestamp_value is None:
@@ -472,19 +488,24 @@ class BinanceConnector(BaseExchange):
             else:  # If in seconds
                 timestamp = datetime.fromtimestamp(timestamp_value)
         
+        # Handle missing fee data gracefully
+        fee_data = order_data.get('fee', {})
+        if not isinstance(fee_data, dict):
+            fee_data = {}
+        
         return Order(
             exchange=self.exchange_name,
-            order_id=order_data['id'],
-            symbol=order_data['symbol'],
-            side=order_data['side'],
-            type=order_data['type'],
+            order_id=order_data.get('id', 'unknown'),
+            symbol=order_data.get('symbol', 'unknown'),
+            side=order_data.get('side', 'unknown'),
+            type=order_data.get('type', 'unknown'),
             price=order_data.get('price'),
-            quantity=order_data['amount'],
-            filled_quantity=order_data['filled'],
-            status=order_data['status'],
+            quantity=order_data.get('amount', 0.0),
+            filled_quantity=order_data.get('filled', 0.0),
+            status=order_data.get('status', 'unknown'),
             timestamp=timestamp,
-            commission=order_data.get('fee', {}).get('cost'),
-            commission_asset=order_data.get('fee', {}).get('currency')
+            commission=fee_data.get('cost') if fee_data else None,
+            commission_asset=fee_data.get('currency') if fee_data else None
         )
     
     async def get_server_time(self) -> int:

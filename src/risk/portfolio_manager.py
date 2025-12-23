@@ -122,9 +122,8 @@ class PortfolioManager:
                             all_balances[asset_identifier]['total_amount'] += balance.total
                             all_balances[asset_identifier]['balances_by_exchange'][exchange_name] = balance.total
                             
-                            # Get price (simplified - would use real price feeds)
-                            # Try both the asset_key and asset_identifier for price lookup
-                            price_usd = self.price_feeds.get(asset_identifier, self.price_feeds.get(asset_key, 0.0))
+                            # Try to fetch real-time price from exchange
+                            price_usd = await self._get_asset_price(asset_identifier, exchange_name, exchange)
                             all_balances[asset_identifier]['prices_usd'][exchange_name] = price_usd
                 
                 except Exception as e:
@@ -153,6 +152,62 @@ class PortfolioManager:
         except Exception as e:
             logger.error(f"Error updating balances: {e}")
             return {}
+    
+    async def _get_asset_price(self, asset: str, exchange_name: str, exchange: BaseExchange) -> float:
+        """
+        Get asset price in USD from exchange
+        
+        Args:
+            asset: Asset symbol (e.g., 'GALA', 'BTC')
+            exchange_name: Name of the exchange
+            exchange: Exchange connector instance
+        
+        Returns:
+            Price in USD, or 0.0 if not available
+        """
+        # First check static price feeds (for stablecoins)
+        if asset in self.price_feeds:
+            return self.price_feeds[asset]
+        
+        # Try to fetch price from exchange using common trading pairs
+        # Common quote currencies to try
+        quote_currencies = ['USDT', 'USD', 'GUSDT', 'GUSDC', 'FDUSD', 'BUSD', 'USDC']
+        
+        for quote in quote_currencies:
+            # Skip if asset is the quote currency itself
+            if asset.upper() == quote.upper():
+                continue
+            
+            symbol = f"{asset}/{quote}"
+            
+            try:
+                # Try to get ticker from exchange
+                if hasattr(exchange, 'get_ticker'):
+                    ticker = await exchange.get_ticker(symbol)
+                    if ticker and ticker.get('last'):
+                        price = float(ticker.get('last', 0))
+                        if price > 0:
+                            # If quote is not USDT/USD, we need to convert
+                            if quote in ['USDT', 'USD', 'FDUSD', 'BUSD', 'USDC']:
+                                return price
+                            elif quote in ['GUSDT', 'GUSDC']:
+                                # GUSDT/GUSDC are typically 1:1 with USD, but verify
+                                # For now, assume 1:1
+                                return price
+                            else:
+                                # Try to get quote price in USD
+                                quote_price = await self._get_asset_price(quote, exchange_name, exchange)
+                                if quote_price > 0:
+                                    return price * quote_price
+                                return price  # Return as-is if we can't convert
+            except Exception as e:
+                # Log at debug level - it's normal for many pairs not to exist
+                logger.debug(f"Could not fetch price for {symbol} on {exchange_name}: {e}")
+                continue
+        
+        # Fallback: return 0.0 if no price found
+        logger.debug(f"No price found for {asset} on {exchange_name}, using 0.0")
+        return 0.0
     
     async def get_portfolio_snapshot(self) -> PortfolioSnapshot:
         """Get current portfolio snapshot"""
