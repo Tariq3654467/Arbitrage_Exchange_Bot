@@ -98,8 +98,3 @@ class TestTradeRequest(BaseModel):
     sell_exchange: str  # e.g. "binance" or "galaswap"
     trade_amount_usd: float = Field(gt=0, description="Notional USD amount to trade")
     force_execute: Optional[bool] = Field(default=False, description="If True, bypass risk checks and execute even if unprofitable (for testing)")
-    """Manual test trade request (single execution)"""
-    symbol: str  # e.g. "GALA/USDT"
-    buy_exchange: str  # e.g. "galaswap" or "binance"
-    sell_exchange: str  # e.g. "binance" or "galaswap"
-    trade_amount_usd: float = Field(gt=0, description="Notional USD amount to trade")

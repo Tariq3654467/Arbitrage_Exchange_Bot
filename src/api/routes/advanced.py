@@ -881,15 +881,15 @@ async def execute_test_trade(
         if not buy_price_data:
             ob = await buy_ex.get_order_book(symbol, depth=10)
             if not ob.best_ask:
-                # During dry-run, simulate GalaSwap liquidity so you can demo a trade
-                if request.buy_exchange == "galaswap" and is_dry_run_active:
-                    logger.warning(f"Simulating GalaSwap ask liquidity for {symbol} during dry-run test trade")
+                # During dry-run OR when force_execute is True, simulate GalaSwap liquidity so you can demo a trade
+                if request.buy_exchange == "galaswap" and (is_dry_run_active or force_execute):
+                    logger.warning(f"Simulating GalaSwap ask liquidity for {symbol} (dry-run={is_dry_run_active}, force_execute={force_execute})")
                     buy_price_data = _make_synthetic_price_data(request.buy_exchange)
                 else:
                     # Provide helpful error message with suggestions
                     error_detail = f"No ask liquidity for {symbol} on {request.buy_exchange}"
                     if request.buy_exchange == "galaswap":
-                        error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (sell on galaswap, buy on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
+                        error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (sell on galaswap, buy on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs), 4) Add 'force_execute: true' to simulate liquidity for testing"
                     raise HTTPException(status_code=400, detail=error_detail)
             else:
                 buy_price_data = PriceData(
@@ -907,15 +907,15 @@ async def execute_test_trade(
         if not sell_price_data:
             ob = await sell_ex.get_order_book(symbol, depth=10)
             if not ob.best_bid:
-                # During dry-run, simulate GalaSwap liquidity so you can demo a trade
-                if request.sell_exchange == "galaswap" and is_dry_run_active:
-                    logger.warning(f"Simulating GalaSwap bid liquidity for {symbol} during dry-run test trade")
+                # During dry-run OR when force_execute is True, simulate GalaSwap liquidity so you can demo a trade
+                if request.sell_exchange == "galaswap" and (is_dry_run_active or force_execute):
+                    logger.warning(f"Simulating GalaSwap bid liquidity for {symbol} (dry-run={is_dry_run_active}, force_execute={force_execute})")
                     sell_price_data = _make_synthetic_price_data(request.sell_exchange)
                 else:
                     # Provide helpful error message with suggestions
                     error_detail = f"No bid liquidity for {symbol} on {request.sell_exchange}"
                     if request.sell_exchange == "galaswap":
-                        error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (buy on galaswap, sell on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
+                        error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (buy on galaswap, sell on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs), 4) Add 'force_execute: true' to simulate liquidity for testing"
                     raise HTTPException(status_code=400, detail=error_detail)
             else:
                 sell_price_data = PriceData(
