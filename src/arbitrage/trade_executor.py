@@ -253,8 +253,11 @@ class TradeExecutor:
                     # If not all requested qty filled, note it but still mark completed
                     if (buy_filled < analysis.buy_amount) or (sell_filled < analysis.sell_amount):
                         result.error_message = "Completed with partial fill"
-                        logger.warning("Trade completed with partial fill: buy_filled=%s sell_filled=%s requested_buy=%s requested_sell=%s",
-                                       buy_filled, sell_filled, analysis.buy_amount, analysis.sell_amount)
+                        logger.warning(
+                            f"Trade completed with partial fill: "
+                            f"buy_filled={buy_filled} sell_filled={sell_filled} "
+                            f"requested_buy={analysis.buy_amount} requested_sell={analysis.sell_amount}"
+                        )
                 else:
                     result.status = TradeStatus.PARTIAL
                     result.error_message = "One or more orders not fully filled"
