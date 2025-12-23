@@ -1629,6 +1629,7 @@ class GalaswapConnector(BaseExchange):
                 current_price = 0
            
             if current_price == 0:
+                logger.debug(f"No price available for {symbol} - pool may not have liquidity")
                 return OrderBook(
                     exchange=self.exchange_name,
                     symbol=symbol,
@@ -1637,30 +1638,120 @@ class GalaswapConnector(BaseExchange):
                     timestamp=datetime.now()
                 )
             
-            # Build simulated order book from current price
-            # V3 DEX doesn't have traditional order book, so we simulate one
+            # Build order book using REAL quotes from the pool
+            # V3 DEX doesn't have traditional order book, so we get quotes at different amounts
             bids = []
             asks = []
            
-            # Create bid levels (buy orders) - slightly below current price
-            for i in range(depth):
-                price = current_price * (1 - 0.001 * (i + 1))  # 0.1% spread per level
-                quantity = 10.0 / (i + 1)  # Decreasing quantity
-                bids.append((price, quantity))
-           
-            # Create ask levels (sell orders) - slightly above current price
-            for i in range(depth):
-                price = current_price * (1 + 0.001 * (i + 1))  # 0.1% spread per level
-                quantity = 10.0 / (i + 1)  # Decreasing quantity
-                asks.append((price, quantity))
+            # Get real quotes for buying base (quote -> base) = ASK price
+            # Get real quotes for selling base (base -> quote) = BID price
+            try:
+                # Test liquidity by getting quotes at different amounts
+                test_amounts = [1.0, 5.0, 10.0, 50.0, 100.0]  # Test with different quote amounts
+                
+                # ASK: How much base can we buy with quote? (quote -> base)
+                # This represents sellers offering base for quote
+                for amount_in in test_amounts[:depth]:
+                    try:
+                        if token0_key == base_token_key:
+                            # Base is token0, quote is token1 - to buy base: quote (token1) in, base (token0) out
+                            quote_resp = await self._make_unsigned_request(
+                                "GET",
+                                f"/v1/trade/quote?tokenIn={token1_key}&tokenOut={token0_key}&amountIn={amount_in}",
+                                None
+                            )
+                        else:
+                            # Base is token1, quote is token0 - to buy base: quote (token0) in, base (token1) out
+                            quote_resp = await self._make_unsigned_request(
+                                "GET",
+                                f"/v1/trade/quote?tokenIn={token0_key}&tokenOut={token1_key}&amountIn={amount_in}",
+                                None
+                            )
+                        
+                        quote_data = quote_resp.get("data", {})
+                        if quote_data:
+                            amount_out = float(quote_data.get("amountOut", 0))
+                            if amount_out > 0:
+                                # Price = amount_in (quote) / amount_out (base) = ask price
+                                ask_price = amount_in / amount_out
+                                asks.append((ask_price, amount_out))
+                    except Exception as e:
+                        logger.debug(f"Could not get ask quote for {symbol} at {amount_in}: {e}")
+                        continue
+                
+                # BID: How much quote can we get for base? (base -> quote)
+                # This represents buyers offering quote for base
+                for amount_in in test_amounts[:depth]:
+                    try:
+                        if token0_key == base_token_key:
+                            # Base is token0, quote is token1 - to sell base: base (token0) in, quote (token1) out
+                            quote_resp = await self._make_unsigned_request(
+                                "GET",
+                                f"/v1/trade/quote?tokenIn={token0_key}&tokenOut={token1_key}&amountIn={amount_in}",
+                                None
+                            )
+                        else:
+                            # Base is token1, quote is token0 - to sell base: base (token1) in, quote (token0) out
+                            quote_resp = await self._make_unsigned_request(
+                                "GET",
+                                f"/v1/trade/quote?tokenIn={token1_key}&tokenOut={token0_key}&amountIn={amount_in}",
+                                None
+                            )
+                        
+                        quote_data = quote_resp.get("data", {})
+                        if quote_data:
+                            amount_out = float(quote_data.get("amountOut", 0))
+                            if amount_out > 0:
+                                # Price = amount_out (quote) / amount_in (base) = bid price
+                                bid_price = amount_out / amount_in
+                                bids.append((bid_price, amount_in))
+                    except Exception as e:
+                        logger.debug(f"Could not get bid quote for {symbol} at {amount_in}: {e}")
+                        continue
+                
+                # Sort bids descending (highest first) and asks ascending (lowest first)
+                bids.sort(key=lambda x: x[0], reverse=True)
+                asks.sort(key=lambda x: x[0])
+                
+                # If we got real quotes, use them
+                if bids or asks:
+                    logger.debug(f"Got {len(bids)} bids and {len(asks)} asks from real quotes for {symbol}")
+                    return OrderBook(
+                        exchange=self.exchange_name,
+                        symbol=symbol,
+                        bids=bids,
+                        asks=asks,
+                        timestamp=datetime.now()
+                    )
+                
+            except Exception as quote_error:
+                logger.debug(f"Error getting real quotes for {symbol}: {quote_error}")
             
-            return OrderBook(
-                exchange=self.exchange_name,
-                symbol=symbol,
-                bids=bids,
-                asks=asks,
-                timestamp=datetime.now()
-            )
+            # Fallback: If no real quotes, use current price with small spread
+            # But only if we have a valid price
+            if current_price > 0:
+                logger.debug(f"Using fallback simulated order book for {symbol} (no real quotes available)")
+                # Create minimal order book from current price
+                spread = current_price * 0.001  # 0.1% spread
+                bids.append((current_price - spread, 10.0))
+                asks.append((current_price + spread, 10.0))
+                
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=bids,
+                    asks=asks,
+                    timestamp=datetime.now()
+                )
+            else:
+                # No price and no quotes - return empty
+                return OrderBook(
+                    exchange=self.exchange_name,
+                    symbol=symbol,
+                    bids=[],
+                    asks=[],
+                    timestamp=datetime.now()
+                )
         
         except (ClientConnectorError, asyncio.TimeoutError) as e:
             # Connection errors: return empty order book to allow bot to continue

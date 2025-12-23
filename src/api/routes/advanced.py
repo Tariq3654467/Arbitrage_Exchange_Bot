@@ -835,7 +835,11 @@ async def execute_test_trade(
         if not buy_price_data:
             ob = await buy_ex.get_order_book(symbol, depth=10)
             if not ob.best_ask:
-                raise HTTPException(status_code=400, detail=f"No ask liquidity for {symbol} on {request.buy_exchange}")
+                # Provide helpful error message with suggestions
+                error_detail = f"No ask liquidity for {symbol} on {request.buy_exchange}"
+                if request.buy_exchange == "galaswap":
+                    error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (sell on galaswap, buy on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
+                raise HTTPException(status_code=400, detail=error_detail)
             buy_price_data = PriceData(
                 exchange=request.buy_exchange,
                 symbol=symbol,
@@ -851,7 +855,11 @@ async def execute_test_trade(
         if not sell_price_data:
             ob = await sell_ex.get_order_book(symbol, depth=10)
             if not ob.best_bid:
-                raise HTTPException(status_code=400, detail=f"No bid liquidity for {symbol} on {request.sell_exchange}")
+                # Provide helpful error message with suggestions
+                error_detail = f"No bid liquidity for {symbol} on {request.sell_exchange}"
+                if request.sell_exchange == "galaswap":
+                    error_detail += ". GalaSwap is a DEX with dynamic liquidity pools. This pair may not have an active pool. Try: 1) Check /api/market/opportunities for pairs with liquidity, 2) Try reverse direction (buy on galaswap, sell on binance), 3) Try GALA/GUSDC or GALA/GUSDT (GalaSwap-only pairs)"
+                raise HTTPException(status_code=400, detail=error_detail)
             sell_price_data = PriceData(
                 exchange=request.sell_exchange,
                 symbol=symbol,
