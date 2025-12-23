@@ -573,16 +573,18 @@ class ArbitrageBot:
                 logger.info(f"Trade not allowed by risk manager: {reason}")
                 return
             
-            # In aggressive mode we execute even if expected net profit is small
-            # or slightly negative. Log this for visibility instead of blocking.
+            # Block trades with negative expected profit (aggressive mode disabled)
+            # This prevents losses and reduces unnecessary API calls
             if not analysis.is_profitable:
                 logger.info(
-                    f"Executing trade despite low/negative expected profit: "
-                    f"{analysis.net_profit_percent:.4f}% (${analysis.net_profit_usd:.4f})"
+                    f"Trade blocked: Negative expected profit "
+                    f"({analysis.net_profit_percent:.4f}%, ${analysis.net_profit_usd:.4f}). "
+                    f"Not executing to prevent losses and reduce API rate limiting."
                 )
+                return
             
-            # Execute trade
-            logger.info(f"Executing trade (aggressive mode): {analysis.opportunity}")
+            # Execute trade (only profitable trades)
+            logger.info(f"Executing profitable trade: {analysis.opportunity}")
             result = await self.trade_executor.execute_trade(analysis)
             
             # Process trade result

@@ -213,7 +213,7 @@ rebalancing:
     ETH: 20
     BNB: 5
     MATIC: 5
-  rebalance_threshold_percent: 10  # Trigger if deviation > 10%
+  rebalance_threshold_percent: 15  # Trigger if deviation > 15% (increased from 10% to reduce frequency)
 
 # ----- MONITORING -----
 monitoring:
@@ -239,8 +239,8 @@ storage:
 # ----- PERFORMANCE -----
 performance:
   max_concurrent_opportunities: 5
-  # Increase interval to reduce Binance REST API load and avoid 429 rate-limit errors.
-  # 1500ms ≈ 0.66 requests/second per pair, which is much safer than 500ms.
-  price_update_interval_ms: 1500
+  # Increased interval to 25s to reduce API rate limiting (especially for GalaSwap).
+  # 25000ms = 25 seconds, significantly reduces API calls and prevents 403/429 errors.
+  price_update_interval_ms: 25000
   order_book_depth: 10
 

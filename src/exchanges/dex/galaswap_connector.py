@@ -776,7 +776,7 @@ class GalaswapConnector(BaseExchange):
         
         # Rate limit cooldown: track when we hit 403 errors to avoid rapid retries
         self._rate_limit_cooldown_until = None  # datetime when cooldown expires
-        self._rate_limit_cooldown_duration = 600  # 10 minutes cooldown after rate limiting
+        self._rate_limit_cooldown_duration = 300  # 5 minutes cooldown after rate limiting
         
         # Token registry for symbol -> token class mapping
         self.token_registry: Dict[str, Dict] = {}
@@ -2296,8 +2296,9 @@ class GalaswapConnector(BaseExchange):
             # Get quote to determine amounts and find available pool
             # Note: Quote endpoint doesn't require token ordering (token0/token1), it uses tokenIn/tokenOut
             # But the underlying pool must exist, and pools require token0 < token1
-            # Try without fee first (API will use default), then with specific fee tiers
-            fee_options = [None, 3000, 500, 10000]  # Try without fee first, then specific tiers
+            # Use only preferred fee tier (3000) to reduce API calls and rate limiting
+            # Previously tried 4 tiers [None, 3000, 500, 10000], now using only 3000
+            fee_options = [3000]  # Use preferred fee tier only to reduce API calls
             quote_data = None
             selected_fee = None
             last_error = None
@@ -2411,8 +2412,8 @@ class GalaswapConnector(BaseExchange):
                         f"❌ RATE LIMITING: Could not get quote for {symbol} due to API rate limiting (403 Forbidden). "
                         f"All fee tiers returned 403 errors. "
                         f"This indicates the API is blocking requests due to rate limits. "
-                        f"Bot will automatically wait {self._rate_limit_cooldown_duration/60:.0f} minutes before retrying. "
-                        f"Tried fee tiers: {fee_options}. "
+                        f"Bot will automatically wait {self._rate_limit_cooldown_duration/60:.0f} minutes (300 seconds) before retrying. "
+                        f"Tried fee tier: {fee_options[0] if fee_options else 'N/A'}. "
                         f"Last error: {error_details}"
                     )
                 else:
