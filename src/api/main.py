@@ -985,6 +985,9 @@ async def get_opportunities(min_profit: Optional[float] = None, limit: int = 100
     
     opportunities = bot.price_monitor.get_recent_opportunities(limit=limit * 2)  # Get more to filter
     
+    # Filter out same-exchange opportunities (not profitable for arbitrage)
+    opportunities = [opp for opp in opportunities if opp.buy_exchange != opp.sell_exchange]
+    
     # Filter by minimum profit if specified, otherwise show all
     if min_profit is not None:
         opportunities = [opp for opp in opportunities if opp.gross_profit_percent >= min_profit]
@@ -1068,7 +1071,17 @@ async def get_balances():
         return {"balances": {}}
     
     try:
-        balances = await bot.portfolio_manager.update_balances()
+        # Use existing balances if available to avoid timeout, or update with timeout
+        import asyncio
+        try:
+            balances = await asyncio.wait_for(
+                bot.portfolio_manager.update_balances(),
+                timeout=10.0  # 10 second timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Portfolio balance update timed out, using cached balances")
+            # Use cached balances if update times out
+            balances = bot.portfolio_manager.current_balances or {}
         
         # Log if Galaswap is connected but has no balances
         if bot.exchanges.get('galaswap') and bot.exchanges['galaswap'].is_connected:
