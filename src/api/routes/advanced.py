@@ -909,15 +909,23 @@ async def execute_test_trade(
         )
 
         # Check risk limits with current portfolio value
+        # Allow bypass for test trades if force_execute is True (for testing even unprofitable trades)
         portfolio_value = await bot.portfolio_manager.get_total_portfolio_value()
         allowed, reason = bot.risk_manager.check_trade_allowed(analysis, portfolio_value)
-        if not allowed:
+        
+        # Check if we should bypass risk checks (for testing)
+        force_execute = getattr(request, 'force_execute', False)
+        
+        if not allowed and not force_execute:
             return {
                 "status": "blocked_by_risk",
                 "reason": reason,
                 "net_profit_percent": analysis.net_profit_percent,
                 "net_profit_usd": analysis.net_profit_usd,
+                "note": "Add 'force_execute: true' to bypass risk checks for testing"
             }
+        elif not allowed and force_execute:
+            logger.warning(f"⚠️ FORCING TRADE EXECUTION despite risk check failure: {reason}")
 
         # Execute exactly one trade
         result = await bot.trade_executor.execute_trade(analysis)
