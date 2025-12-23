@@ -1116,6 +1116,7 @@ async def get_trade_history(limit: int = 50):
                 "profit_usd": trade.actual_profit_usd,
                 "profit_percent": trade.actual_profit_percent,
                 "status": trade.status.value,
+                "error_message": trade.error_message,
                 "timestamp": trade.timestamp.isoformat()
             }
             for trade in trades
