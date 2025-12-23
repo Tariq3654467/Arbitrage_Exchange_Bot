@@ -230,16 +230,31 @@ class TradeExecutor:
             
             # Calculate actual profit
             if buy_order and sell_order:
-                if buy_order.status == 'filled' and sell_order.status == 'filled':
+                buy_filled = buy_order.filled_quantity or 0
+                sell_filled = sell_order.filled_quantity or 0
+                filled_qty = min(buy_filled, sell_filled)
+
+                # Consider both 'filled' and 'closed' as terminal filled states (ccxt may use 'closed')
+                buy_filled_status = buy_order.status in ['filled', 'closed']
+                sell_filled_status = sell_order.status in ['filled', 'closed']
+
+                if filled_qty > 0 and buy_filled_status and sell_filled_status:
                     actual_buy_price = buy_order.price or analysis.opportunity.buy_price
                     actual_sell_price = sell_order.price or analysis.opportunity.sell_price
-                    
-                    actual_profit_usd = (actual_sell_price - actual_buy_price) * buy_order.filled_quantity
-                    actual_profit_percent = (actual_profit_usd / analysis.trade_amount) * 100
-                    
+
+                    actual_profit_usd = (actual_sell_price - actual_buy_price) * filled_qty
+                    denom = analysis.trade_amount or (filled_qty * actual_buy_price) or 1
+                    actual_profit_percent = (actual_profit_usd / denom) * 100
+
                     result.actual_profit_usd = actual_profit_usd
                     result.actual_profit_percent = actual_profit_percent
                     result.status = TradeStatus.COMPLETED
+
+                    # If not all requested qty filled, note it but still mark completed
+                    if (buy_filled < analysis.buy_amount) or (sell_filled < analysis.sell_amount):
+                        result.error_message = "Completed with partial fill"
+                        logger.warning("Trade completed with partial fill: buy_filled=%s sell_filled=%s requested_buy=%s requested_sell=%s",
+                                       buy_filled, sell_filled, analysis.buy_amount, analysis.sell_amount)
                 else:
                     result.status = TradeStatus.PARTIAL
                     result.error_message = "One or more orders not fully filled"
