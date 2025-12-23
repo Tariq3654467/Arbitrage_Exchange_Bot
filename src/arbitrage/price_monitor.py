@@ -346,7 +346,9 @@ class PriceMonitor:
                             
                             # Notify callbacks only for opportunities above execution threshold
                             # (This triggers trade execution analysis)
-                            if gross_profit_percent >= self.min_profit_threshold:
+                            # IMPORTANT: Skip same-exchange opportunities - they're never profitable for arbitrage
+                            # Same-exchange trades always lose money due to spread + fees
+                            if gross_profit_percent >= self.min_profit_threshold and best_buy_exchange != best_sell_exchange:
                                 for callback in self.opportunity_callbacks:
                                     try:
                                         await callback(opportunity)
