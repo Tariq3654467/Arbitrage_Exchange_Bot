@@ -279,11 +279,19 @@ class BinanceConnector(BaseExchange):
                     notional_value = quantity * current_price
                     min_notional = await self.get_min_notional(symbol)
                     
-                    if notional_value < min_notional:
+                    # Add 10% safety buffer to account for price fluctuations
+                    # This prevents orders from failing due to small price movements
+                    min_notional_with_buffer = min_notional * 1.1
+                    
+                    if notional_value < min_notional_with_buffer:
+                        required_quantity = min_notional_with_buffer / current_price
+                        suggested_usd = min_notional_with_buffer
+                        
                         error_msg = (
-                            f"Order notional value (${notional_value:.2f}) is below minimum (${min_notional:.2f}) for {symbol}. "
-                            f"Required quantity: {min_notional / current_price:.8f} {symbol.split('/')[0]} "
-                            f"(or increase trade amount to at least ${min_notional * 1.1:.2f} USD)"
+                            f"Order notional value (${notional_value:.2f}) is below minimum with safety buffer "
+                            f"(${min_notional_with_buffer:.2f}, base minimum: ${min_notional:.2f}) for {symbol}. "
+                            f"Required quantity: {required_quantity:.8f} {symbol.split('/')[0]} "
+                            f"(or increase trade amount to at least ${suggested_usd:.2f} USD to account for price fluctuations)"
                         )
                         logger.error(error_msg)
                         raise ValueError(error_msg)
@@ -314,13 +322,16 @@ class BinanceConnector(BaseExchange):
                     current_price = ticker.get('last') or ticker.get('ask') or ticker.get('bid')
                     min_notional = await self.get_min_notional(symbol)
                     if current_price:
-                        required_quantity = min_notional / current_price
+                        # Add 10% safety buffer
+                        min_notional_with_buffer = min_notional * 1.1
+                        required_quantity = min_notional_with_buffer / current_price
                         helpful_msg = (
                             f"Binance minimum notional not met for {symbol}. "
                             f"Order value: ${quantity * current_price:.2f}, "
-                            f"Minimum required: ${min_notional:.2f}. "
+                            f"Minimum required (with 10% buffer): ${min_notional_with_buffer:.2f} "
+                            f"(base minimum: ${min_notional:.2f}). "
                             f"Required quantity: {required_quantity:.8f} {symbol.split('/')[0]} "
-                            f"(or increase trade amount to at least ${min_notional * 1.1:.2f} USD)"
+                            f"(or increase trade amount to at least ${min_notional_with_buffer:.2f} USD)"
                         )
                         logger.error(helpful_msg)
                         raise ValueError(helpful_msg)

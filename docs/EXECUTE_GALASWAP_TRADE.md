@@ -73,7 +73,7 @@ curl -X POST http://localhost:8000/api/trades/test \
     "symbol": "GALA/USDT",
     "buy_exchange": "binance",
     "sell_exchange": "binance",
-    "trade_amount_usd": 5.0
+    "trade_amount_usd": 1.0
   }'
 ```
 
